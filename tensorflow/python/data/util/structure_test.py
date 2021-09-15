@@ -686,7 +686,7 @@ class StructureTest(test_base.DatasetTestBase, parameterized.TestCase):
       structure.to_tensor_list(s_tensor, value_nest)
 
     with self.assertRaisesRegex(TypeError,
-                                "Neither a SparseTensor nor SparseTensorValue"):
+                                "neither a SparseTensor nor SparseTensorValue"):
       structure.to_tensor_list(s_sparse_tensor, value_tensor)
 
     with self.assertRaisesRegex(
@@ -702,8 +702,9 @@ class StructureTest(test_base.DatasetTestBase, parameterized.TestCase):
       structure.to_tensor_list(s_nest, value_sparse_tensor)
 
     with self.assertRaisesRegex(
-        ValueError, "Cannot create a tensor from the input list because item 0 "
-        ".*tf.Tensor.* is incompatible with the expected type spec "
+        ValueError,
+        "Cannot create a Tensor from the tensor list because item 0 "
+        ".*tf.Tensor.* is incompatible with the expected TypeSpec "
         ".*TensorSpec.*"):
       structure.from_tensor_list(s_tensor, flat_sparse_tensor)
 
@@ -711,8 +712,8 @@ class StructureTest(test_base.DatasetTestBase, parameterized.TestCase):
       structure.from_tensor_list(s_tensor, flat_nest)
 
     with self.assertRaisesRegex(
-        ValueError, "Cannot create a tensor from the input list because item 0 "
-        ".*tf.Tensor.* is incompatible with the expected type spec "
+        ValueError, "Cannot create a SparseTensor from the tensor list because "
+        "item 0 .*tf.Tensor.* is incompatible with the expected TypeSpec "
         ".*TensorSpec.*"):
       structure.from_tensor_list(s_sparse_tensor, flat_tensor)
 
@@ -775,7 +776,7 @@ class StructureTest(test_base.DatasetTestBase, parameterized.TestCase):
       structure.to_tensor_list(s_0, value_2)
 
     with self.assertRaisesRegex(TypeError,
-                                "Neither a SparseTensor nor SparseTensorValue"):
+                                "neither a SparseTensor nor SparseTensorValue"):
       structure.to_tensor_list(s_1, value_0)
 
     with self.assertRaisesRegex(
@@ -795,14 +796,14 @@ class StructureTest(test_base.DatasetTestBase, parameterized.TestCase):
       structure.to_tensor_list(s_2, value_1)
 
     with self.assertRaisesRegex(ValueError,
-                                r"Cannot create a tensor from the input list"):
+                                r"Cannot create a Tensor from the tensor list"):
       structure.from_tensor_list(s_0, flat_s_1)
 
     with self.assertRaisesRegex(ValueError, "Expected 2 tensors but got 3"):
       structure.from_tensor_list(s_0, flat_s_2)
 
-    with self.assertRaisesRegex(ValueError,
-                                "Cannot create a tensor from the input list"):
+    with self.assertRaisesRegex(
+        ValueError, "Cannot create a SparseTensor from the tensor list"):
       structure.from_tensor_list(s_1, flat_s_0)
 
     with self.assertRaisesRegex(ValueError, "Expected 2 tensors but got 3"):

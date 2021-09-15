@@ -65,6 +65,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/dot_decomposer.h"
 #include "tensorflow/compiler/xla/service/dot_merger.h"
 #include "tensorflow/compiler/xla/service/dump.h"
+#include "tensorflow/compiler/xla/service/dynamic_dimension_simplifier.h"
 #include "tensorflow/compiler/xla/service/dynamic_index_splitter.h"
 #include "tensorflow/compiler/xla/service/dynamic_padder.h"
 #include "tensorflow/compiler/xla/service/eigh_expander.h"
@@ -72,6 +73,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/gather_expander.h"
 #include "tensorflow/compiler/xla/service/gpu/alias_passthrough_params.h"
 #include "tensorflow/compiler/xla/service/gpu/cudnn_batchnorm_rewriter.h"
+#include "tensorflow/compiler/xla/service/gpu/fusion_bitcast_lift.h"
 #include "tensorflow/compiler/xla/service/gpu/fusion_merger.h"
 #include "tensorflow/compiler/xla/service/gpu/gemm_broadcast_folding_rewriter.h"
 #include "tensorflow/compiler/xla/service/gpu/gemm_rewriter.h"
@@ -161,6 +163,7 @@ limitations under the License.
 
 #if BEF_EXECUTABLE
 #include "tensorflow/compiler/mlir/tfrt/transforms/lhlo_gpu_to_tfrt_gpu/gpu_passes.h"
+#include "tfrt/gpu/pass/pass.h"  // from @tf_runtime
 #include "tfrt/bef/bef_buffer.h"  // from @tf_runtime
 #include "tfrt/bef_converter/mlir_to_bef_translate.h"  // from @tf_runtime
 #endif  // BEF_EXECUTABLE
@@ -226,6 +229,15 @@ class GpuBfloat16Support : public BFloat16Support {
   se::StreamExecutor* stream_exec_;
 };
 
+int64_t GetSizeOfShape(const Shape& shape, int pointer_size) {
+  if (shape.is_static() || shape.IsTuple()) {
+    return ShapeUtil::ByteSizeOf(shape, pointer_size);
+  }
+  // Each dynamic dimension size is represented as a S32.
+  int64_t metadata_size = sizeof(int32) * shape.dimensions_size();
+  return ShapeUtil::ByteSizeOf(shape, pointer_size) + metadata_size;
+}
+
 }  // end anonymous namespace
 
 using OwnedThunkSchedule = GpuExecutable::OwnedThunkSchedule;
@@ -243,6 +255,12 @@ GpuCompiler::GpuCompiler(se::Platform::Id platform_id,
 Status GpuCompiler::OptimizeHloModule(
     HloModule* hlo_module, se::StreamExecutor* stream_exec,
     se::DeviceMemoryAllocator* device_allocator) {
+  // Save proto state before optimizations if we want a snapshot.
+  if (DumpingEnabledForHloModule(*hlo_module)) {
+    hlo_proto_ = absl::make_unique<HloProto>();
+    *hlo_proto_->mutable_hlo_module() = hlo_module->ToProto();
+  }
+
   {
     HloPassPipeline pipeline("optimization");
     pipeline.AddInvariantChecker<HloVerifier>(/*layout_sensitive=*/false,
@@ -313,7 +331,11 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<LogisticExpander>(
         /*expansion_type=*/LogisticExpansionType::kExp);
     pipeline.AddPass<ConditionalCanonicalizer>();
-    pipeline.AddPass<DynamicPadder>();
+    pipeline.AddPass<DynamicDimensionSimplifier>();
+    auto dynamic_padder_options = DynamicPadderOptions();
+    dynamic_padder_options.shape_check_mode =
+        DynamicDimensionInference::ShapeCheckMode::kCompileTime;
+    pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
 
     // Build simplification pipeline.  The passes in here are run to a fixed
     // point.
@@ -470,6 +492,9 @@ Status GpuCompiler::OptimizeHloModule(
     HloPassFix<HloPassPipeline> horizontal_fusion("horizontal fusion");
     horizontal_fusion.AddPass<GpuHorizontalLoopFusion>();
     horizontal_fusion.AddPass<GpuHorizontalInputFusion>();
+    // FusionBitcastLift must be after InstructionFusion, as it undoes
+    // part of it.
+    horizontal_fusion.AddPass<FusionBitcastLift>();
     horizontal_fusion.AddPass<HloCSE>(/*is_layout_sensitive=*/true,
                                       /*only_fusion_computations=*/true);
     horizontal_fusion.AddPass<HloDCE>();
@@ -658,31 +683,23 @@ static absl::optional<bool> DummyCanShareBufferFunction(const HloInstruction*,
   return absl::nullopt;
 }
 
-StatusOr<
-    std::tuple<std::unique_ptr<HloModule>, std::unique_ptr<BufferAssignment>>>
-GpuCompiler::RunHloPassesAndBufferAssignement(
-    std::unique_ptr<HloModule> hlo_module, se::StreamExecutor* executor,
-    bool optimize, const CompileOptions& options) {
-  if (optimize) {
-    TF_ASSIGN_OR_RETURN(hlo_module,
-                        RunHloPasses(std::move(hlo_module), executor, options));
-  }
-
+StatusOr<std::unique_ptr<BufferAssignment>> GpuCompiler::AssignBuffers(
+    const HloModule* hlo_module) {
   std::unique_ptr<StreamAssignment> stream_assignment =
       AssignStreams(*hlo_module);
-  TF_ASSIGN_OR_RETURN(std::unique_ptr<GpuHloSchedule> hlo_schedule,
-                      GpuHloSchedule::Build(hlo_module.get(),
-                                            *stream_assignment, pointer_size_));
+  TF_ASSIGN_OR_RETURN(
+      std::unique_ptr<GpuHloSchedule> hlo_schedule,
+      GpuHloSchedule::Build(hlo_module, *stream_assignment, pointer_size_));
 
   auto buffer_size_bytes_function =
       [this](const BufferValue& buffer_value) -> int64_t {
-    return GpuCompiler::GetSizeOfShape(buffer_value.shape(), pointer_size_);
+    return GetSizeOfShape(buffer_value.shape(), pointer_size_);
   };
 
   TF_ASSIGN_OR_RETURN(
       std::unique_ptr<BufferAssignment> assignment,
       BufferAssigner::Run(
-          hlo_module.get(), hlo_schedule->ConsumeHloOrdering(),
+          hlo_module, hlo_schedule->ConsumeHloOrdering(),
           buffer_size_bytes_function,
           /*color_alignment=*/
           [](LogicalBuffer::Color) { return kXlaAllocatedBufferAlignBytes; },
@@ -690,7 +707,7 @@ GpuCompiler::RunHloPassesAndBufferAssignement(
           /*colorer=*/BufferAssigner::DefaultColorer(),
           /*must_not_live_out=*/{}, GetCanShareBuffer()));
 
-  return std::make_tuple(std::move(hlo_module), std::move(assignment));
+  return std::move(assignment);
 }
 
 #if BEF_EXECUTABLE
@@ -705,7 +722,7 @@ static StatusOr<OwnedBefBuffer> LowerToBef(mlir::ModuleOp mlir_module) {
                        mlir::PassManager::Nesting::Implicit);
   pm.addPass(tensorflow::createLmhloGpuAsyncConversionPass());
   pm.addPass(mlir::createGpuAsyncRegionPass());
-  pm.addPass(tensorflow::createAsyncGpuTfrtConversionPass());
+  tfrt::gpu::populateGpuToTfrtGpuPasses(pm);
   if (pm.run(mlir_module).failed()) {
     return InternalError(
         "Failed to lower LHLO to TFRT Dialect with gpu kernels.");
@@ -770,7 +787,7 @@ static Status CompileModuleToLlvmIrImpl(
 
   auto buffer_size_bytes_function =
       [pointer_size](const BufferValue& buffer_value) -> int64_t {
-    return GpuCompiler::GetSizeOfShape(buffer_value.shape(), pointer_size);
+    return GetSizeOfShape(buffer_value.shape(), pointer_size);
   };
 
   TF_ASSIGN_OR_RETURN(
@@ -1145,8 +1162,7 @@ StatusOr<std::unique_ptr<Executable>> GpuCompiler::RunBackend(
   // Dump computation proto state and buffer assignment for debug and test, if
   // dump is enabled.
   if (DumpingEnabledForHloModule(gpu_executable->module())) {
-    auto hlo_proto = absl::make_unique<HloProto>();
-    *hlo_proto->mutable_hlo_module() = gpu_executable->module().ToProto();
+    auto hlo_proto = absl::make_unique<HloProto>(*hlo_proto_);
     *hlo_proto->mutable_buffer_assignment() =
         compile_module_results.buffer_assignment->ToProto();
     gpu_executable->set_hlo_proto(std::move(hlo_proto));
@@ -1180,6 +1196,13 @@ StatusOr<std::vector<std::unique_ptr<AotCompilationResult>>>
 GpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
                                 const AotCompilationOptions& options) {
   return Unimplemented("not yet implemented: GpuCompiler::CompileAheadOfTime");
+}
+
+HloCostAnalysis::ShapeSizeFunction GpuCompiler::ShapeSizeBytesFunction() const {
+  // Capture just the pointer size, not the entire GpuCompiler object.
+  return [pointer_size = pointer_size_](const Shape& shape) {
+    return GetSizeOfShape(shape, pointer_size);
+  };
 }
 
 StatusOr<std::unique_ptr<llvm::Module>> CompileModuleToLlvmIr(
