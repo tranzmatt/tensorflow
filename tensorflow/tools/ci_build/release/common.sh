@@ -53,8 +53,8 @@ function readable_run {
 # LINT.IfChange
 # Redirect bazel output dir b/73748835
 function set_bazel_outdir {
-  mkdir -p /tmpfs/bazel_output
-  export TEST_TMPDIR=/tmpfs/bazel_output
+  mkdir -p /tmp/bazel_output
+  export TEST_TMPDIR=/tmp/bazel_output
 }
 
 # Downloads bazelisk to ~/bin as `bazel`.

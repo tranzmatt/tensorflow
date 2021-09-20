@@ -4,11 +4,11 @@
 # glibc (2.12) and system libstdc++ (4.4).
 #
 # To push a new version, run:
-# $ docker build -f Dockerfile.rbe.cuda11.4-cudnn8.2-ubuntu18.04-manylinux2010-multipython \
-#  --tag "gcr.io/tensorflow-testing/nosla-cuda11.4-cudnn8.2-ubuntu18.04-manylinux2010-multipython" .
-# $ docker push gcr.io/tensorflow-testing/nosla-cuda11.4-cudnn8.2-ubuntu18.04-manylinux2010-multipython
+# $ docker build -f Dockerfile.rbe.cuda11.3-cudnn8.2-ubuntu18.04-manylinux2010-multipython \
+#  --tag "gcr.io/tensorflow-testing/nosla-cuda11.3-cudnn8.2-ubuntu18.04-manylinux2010-multipython" .
+# $ docker push gcr.io/tensorflow-testing/nosla-cuda11.3-cudnn8.2-ubuntu18.04-manylinux2010-multipython
 
-FROM nvidia/cuda:11.4.1-cudnn8-devel-ubuntu18.04 as devtoolset
+FROM nvidia/cuda:11.3.1-cudnn8-devel-ubuntu18.04 as devtoolset
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
@@ -35,7 +35,7 @@ RUN /build_devtoolset.sh devtoolset-7 /dt7
 RUN /build_devtoolset.sh devtoolset-8 /dt8
 
 # TODO(klimek): Split up into two different docker images.
-FROM nvidia/cuda:11.4.1-cudnn8-devel-ubuntu18.04
+FROM nvidia/cuda:11.3.1-cudnn8-devel-ubuntu18.04
 COPY --from=devtoolset /dt7 /dt7
 COPY --from=devtoolset /dt8 /dt8
 
@@ -43,12 +43,12 @@ COPY --from=devtoolset /dt8 /dt8
 RUN apt-get update && \
     apt-get install -y \
         --allow-change-held-packages \
-        libcudnn8=8.2.*-1+cuda11.4 \
-        libcudnn8-dev=8.2.*-1+cuda11.4 \
-        libnvinfer-dev=8.0.3-1+cuda11.? \
-        libnvinfer8=8.0.3-1+cuda11.? \
-        libnvinfer-plugin-dev=8.0.3-1+cuda11.? \
-        libnvinfer-plugin8=8.0.3-1+cuda11.? && \
+        libcudnn8=8.2.*-1+cuda11.3 \
+        libcudnn8-dev=8.2.*-1+cuda11.3 \
+        libnvinfer-dev=8.0.3-1+cuda11.3 \
+        libnvinfer8=8.0.3-1+cuda11.3 \
+        libnvinfer-plugin-dev=8.0.3-1+cuda11.3 \
+        libnvinfer-plugin8=8.0.3-1+cuda11.3 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy and run the install scripts.
