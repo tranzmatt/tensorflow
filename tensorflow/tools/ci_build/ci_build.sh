@@ -162,6 +162,24 @@ mkdir -p ${WORKSPACE}/bazel-ci_build-cache
 # By default we cleanup - remove the container once it finish running (--rm)
 # and share the PID namespace (--pid=host) so the process inside does not have
 # pid 1 and SIGKILL is propagated to the process inside (jenkins can kill it).
+echo ${DOCKER_BINARY} run --rm --name ${DOCKER_IMG_NAME} --pid=host \
+    -v ${WORKSPACE}/bazel-ci_build-cache:${WORKSPACE}/bazel-ci_build-cache \
+    -e "CI_BUILD_HOME=${WORKSPACE}/bazel-ci_build-cache" \
+    -e "CI_BUILD_USER=$(id -u -n)" \
+    -e "CI_BUILD_UID=$(id -u)" \
+    -e "CI_BUILD_GROUP=$(id -g -n)" \
+    -e "CI_BUILD_GID=$(id -g)" \
+    -e "CI_TENSORFLOW_SUBMODULE_PATH=${CI_TENSORFLOW_SUBMODULE_PATH}" \
+    ${CI_BUILD_USER_FORCE_BADNAME_ENV} \
+    -v ${WORKSPACE}:/workspace \
+    -w /workspace \
+    ${GPU_EXTRA_PARAMS} \
+    ${ROCM_EXTRA_PARAMS} \
+    ${CI_DOCKER_EXTRA_PARAMS[@]} \
+    "${DOCKER_IMG_NAME}" \
+    ${CI_COMMAND_PREFIX[@]} \
+    ${COMMAND[@]}
+
 ${DOCKER_BINARY} run --rm --name ${DOCKER_IMG_NAME} --pid=host \
     -v ${WORKSPACE}/bazel-ci_build-cache:${WORKSPACE}/bazel-ci_build-cache \
     -e "CI_BUILD_HOME=${WORKSPACE}/bazel-ci_build-cache" \

@@ -30,7 +30,7 @@ shift 1
 
 COMMAND=("$@")
 
-export CI_BUILD_PYTHON="${CI_BUILD_PYTHON:-python}"
+export CI_BUILD_PYTHON="${CI_BUILD_PYTHON:-python3}"
 export PYTHON_BIN_PATH="${PYTHON_BIN_PATH:-$(which ${CI_BUILD_PYTHON})}"
 # XLA currently does not build under Android, so disable it for now.
 if [[ "${CONTAINER_TYPE}" == 'android' ]]; then
