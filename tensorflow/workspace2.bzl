@@ -19,7 +19,6 @@ load("//third_party/llvm:setup.bzl", "llvm_setup")
 # Import third party repository rules. See go/tfbr-thirdparty.
 load("//third_party/FP16:workspace.bzl", FP16 = "repo")
 load("//third_party/absl:workspace.bzl", absl = "repo")
-load("//third_party/aws:workspace.bzl", aws = "repo")
 load("//third_party/benchmark:workspace.bzl", benchmark = "repo")
 load("//third_party/clog:workspace.bzl", clog = "repo")
 load("//third_party/cpuinfo:workspace.bzl", cpuinfo = "repo")
@@ -57,7 +56,6 @@ def _initialize_third_party():
     """ Load third party repositories.  See above load() statements. """
     FP16()
     absl()
-    aws()
     benchmark()
     clog()
     cpuinfo()
@@ -135,11 +133,11 @@ def _tf_repositories():
     # LINT.IfChange
     tf_http_archive(
         name = "XNNPACK",
-        sha256 = "f3b3256b6dcde8002159df50380b86087ae9ee927464b4179a22028be8a5ac20",
-        strip_prefix = "XNNPACK-0f6613555829d59cbc165f1be87bdcd5137e23d2",
+        sha256 = "718d8c31d2179ed35ba6c3472ffbae25889658bd34cd945df509827531ac4d4f",
+        strip_prefix = "XNNPACK-5cc31e32aa87d10f844882156b396bea998891a6",
         urls = [
-            "https://storage.googleapis.com/mirror.tensorflow.org/github.com/google/XNNPACK/archive/0f6613555829d59cbc165f1be87bdcd5137e23d2.zip",
-            "https://github.com/google/XNNPACK/archive/0f6613555829d59cbc165f1be87bdcd5137e23d2.zip",
+            "https://storage.googleapis.com/mirror.tensorflow.org/github.com/google/XNNPACK/archive/5cc31e32aa87d10f844882156b396bea998891a6.zip",
+            "https://github.com/google/XNNPACK/archive/5cc31e32aa87d10f844882156b396bea998891a6.zip",
         ],
     )
     # LINT.ThenChange(//tensorflow/lite/tools/cmake/modules/xnnpack.cmake)
@@ -201,6 +199,7 @@ def _tf_repositories():
     tf_http_archive(
         name = "mkl_dnn_acl_compatible",
         build_file = "//third_party/mkl_dnn:mkldnn_acl.BUILD",
+        patch_file = "//third_party/mkl_dnn:onednn_acl_primitives.patch",
         sha256 = "ccb2dbd9da36cd873cf573b4201d61bdba7438f12b144e6c7d061eb12a641751",
         strip_prefix = "oneDNN-2.3",
         urls = [

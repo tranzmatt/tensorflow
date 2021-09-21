@@ -343,7 +343,11 @@ message DebugOptions {
   // enables dumping in all pipelines.
   string xla_dump_hlo_pipeline_re = 154;
 
-  // Next id: 156
+  // If true, abort immediately when conv algorithm picker fails, rather than
+  // logging a warning and proceeding with fallback.
+  bool xla_gpu_strict_conv_algorithm_picker = 156;
+
+  // Next id: 157
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.
@@ -408,6 +412,15 @@ message ExecutionOptions {
   bool deduplicate_hlo = 12;
 
   reserved 13;  // Was broadcast_replicated_parameters_via_collectives
+
+  // Allows sharding propagation to propagate to the outputs. This changes the
+  // output shape of the computation (which is undesirable), but it can be used
+  // to allow to run partial compilation to determine what would be the output
+  // sharding of a computation if XLA would be allowed to propagate the sharding
+  // which can be used by higher level framework as a way to query intermediate
+  // sharding of operations when multiple computation would be chained and
+  // merged together.
+  bool allow_spmd_sharding_propagation_to_output = 14;
 }
 
 message GetDeviceHandlesRequest {

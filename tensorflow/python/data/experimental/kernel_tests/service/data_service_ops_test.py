@@ -82,7 +82,7 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
   @combinations.generate(test_base.default_test_combinations())
   def testDistributeInvalidCompression(self):
     cluster = data_service_test_base.TestCluster(num_workers=1)
-    with self.assertRaisesRegex(ValueError, "Invalid compression argument"):
+    with self.assertRaisesRegex(ValueError, "Invalid `compression` argument"):
       self.make_distributed_range_dataset(10, cluster, compression="foo")
 
   @combinations.generate(test_base.eager_only_combinations())
@@ -254,7 +254,7 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
   @combinations.generate(test_base.default_test_combinations())
   def testEmptyJobNameDistribute(self):
     cluster = data_service_test_base.TestCluster(num_workers=1)
-    with self.assertRaisesRegex(ValueError, "job_name must not be empty"):
+    with self.assertRaisesRegex(ValueError, "`job_name` must not be empty"):
       dataset_ops.Dataset.range(10).apply(
           data_service_ops.distribute(
               processing_mode="parallel_epochs",
@@ -266,7 +266,7 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
     cluster = data_service_test_base.TestCluster(num_workers=1)
     dataset_id = data_service_ops.register_dataset(
         cluster.dispatcher.target, dataset_ops.Dataset.range(10))
-    with self.assertRaisesRegex(ValueError, "job_name must not be empty"):
+    with self.assertRaisesRegex(ValueError, "`job_name` must not be empty"):
       data_service_ops.from_dataset_id(
           dataset_id=dataset_id,
           processing_mode="parallel_epochs",
@@ -274,9 +274,24 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
           job_name="")
 
   @combinations.generate(test_base.default_test_combinations())
+  def testExplicitProtocolFromDatasetId(self):
+    cluster = data_service_test_base.TestCluster(
+        num_workers=1, data_transfer_protocol="grpc")
+    range_ds = dataset_ops.Dataset.range(10)
+    dataset_id = data_service_ops.register_dataset(cluster.dispatcher.target,
+                                                   range_ds)
+    ds = data_service_ops.from_dataset_id(
+        dataset_id=dataset_id,
+        processing_mode="parallel_epochs",
+        element_spec=range_ds.element_spec,
+        service=cluster.dispatcher.target,
+        data_transfer_protocol="grpc")
+    self.assertDatasetProduces(ds, list(range(10)))
+
+  @combinations.generate(test_base.default_test_combinations())
   def testNonStringJobNameDistribute(self):
     cluster = data_service_test_base.TestCluster(num_workers=1)
-    with self.assertRaisesRegex(ValueError, "job_name must be a string"):
+    with self.assertRaisesRegex(ValueError, "`job_name` must be a string"):
       dataset_ops.Dataset.range(10).apply(
           data_service_ops.distribute(
               processing_mode="parallel_epochs",
@@ -288,7 +303,7 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
     cluster = data_service_test_base.TestCluster(num_workers=1)
     dataset_id = data_service_ops.register_dataset(
         cluster.dispatcher.target, dataset_ops.Dataset.range(10))
-    with self.assertRaisesRegex(ValueError, "job_name must be a string"):
+    with self.assertRaisesRegex(ValueError, "`job_name` must be a string"):
       data_service_ops.from_dataset_id(
           dataset_id=dataset_id,
           processing_mode="parallel_epochs",
@@ -502,7 +517,7 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
   @combinations.generate(test_base.default_test_combinations())
   def testDistributeNonStringAddresses(self):
     ds = dataset_ops.Dataset.range(10)
-    with self.assertRaisesRegex(ValueError, "service must be a string"):
+    with self.assertRaisesRegex(ValueError, "`service` must be a string"):
       ds = ds.apply(
           data_service_ops.distribute(
               processing_mode="parallel_epochs", service=1))
@@ -511,7 +526,7 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
   def testDistributeEmptyAddress(self):
     ds = dataset_ops.Dataset.range(10)
     with self.assertRaisesWithLiteralMatch(ValueError,
-                                           "service must not be empty"):
+                                           "`service` must not be empty"):
       ds = ds.apply(
           data_service_ops.distribute(
               processing_mode="parallel_epochs", service=""))
@@ -544,7 +559,9 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
   def testDistributeInvalidProcessingMode(self):
     ds = dataset_ops.Dataset.range(10)
     with self.assertRaisesRegex(
-        ValueError, "should be a ShardingPolicy, `\"parallel_epochs\"`, or "
+        ValueError,
+        "should be a `tf.data.experimental.service.ShardingPolicy`, "
+        "`\"parallel_epochs\"`, or "
         "`\"distributed_epoch\"`. Got 'invalid'."):
       ds = ds.apply(
           data_service_ops.distribute(
@@ -792,7 +809,7 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
     dataset_id = data_service_ops.register_dataset(cluster.dispatcher_address(),
                                                    ds)
     with self.assertRaisesRegex(
-        ValueError, "In graph mode element_spec must be provided manually."):
+        ValueError, "In graph mode `element_spec` must be provided manually."):
       ds = data_service_ops.from_dataset_id("parallel_epochs",
                                             cluster.dispatcher_address(),
                                             dataset_id)
@@ -845,6 +862,12 @@ class DataServiceOpsTest(data_service_test_base.TestBase,
     dataset = self.make_distributed_dataset(
         dataset, cluster=cluster, processing_mode=ShardingPolicy.OFF)
     self.assertDatasetProduces(dataset, list(range(20)))
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testCardinality(self):
+    cluster = data_service_test_base.TestCluster(num_workers=1)
+    dataset = self.make_distributed_range_dataset(10, cluster)
+    self.assertEqual(self.evaluate(dataset.cardinality()), dataset_ops.UNKNOWN)
 
 
 if __name__ == "__main__":

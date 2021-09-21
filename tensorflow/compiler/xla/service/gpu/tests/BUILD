@@ -177,9 +177,9 @@ tf_cc_test(
 )
 
 tf_cc_test(
-    name = "gpu_spmd_single_partition_test",
+    name = "gpu_spmd_e2e_compile_test",
     size = "small",
-    srcs = ["gpu_spmd_single_partition_test.cc"],
+    srcs = ["gpu_spmd_e2e_compile_test.cc"],
     tags = tf_cuda_tests_tags(),
     deps = [
         ":gpu_codegen_test",
@@ -198,6 +198,7 @@ tf_cc_test(
     ],
     tags = tf_cuda_tests_tags() + [
         "no_rocm",
+        "no_bef_thunk",  # complex<fp16> tests fail, see b/187959015.
     ],
     deps = [
         ":gpu_codegen_test",

@@ -114,7 +114,7 @@ class BincountTest(test_util.TensorFlowTestCase):
     np.random.seed(42)
     arr = np.random.randint(0, 1000, num_samples)
     try:
-      config.enable_deterministic_ops(True)
+      config.enable_op_determinism()
       with test_util.use_gpu():
         if test_util.is_gpu_available(cuda_only=True):
           with self.assertRaisesRegexp(
@@ -122,7 +122,7 @@ class BincountTest(test_util.TensorFlowTestCase):
               "supported for Bincount."):
             self.evaluate(bincount_ops.bincount(arr, None))
     finally:
-      config.enable_deterministic_ops(False)
+      config.disable_op_determinism()
 
   def test_zero_weights(self):
     with self.session():
@@ -136,11 +136,12 @@ class BincountTest(test_util.TensorFlowTestCase):
       with self.assertRaises(errors.InvalidArgumentError):
         self.evaluate(bincount_ops.bincount([1, 2, 3, -1, 6, 8]))
 
+  @test_util.run_in_graph_and_eager_modes
   def test_shape_function(self):
     # size must be scalar.
     with self.assertRaisesRegex(
         (ValueError, errors.InvalidArgumentError),
-        "Shape must be rank 0 but is rank 1 .*Bincount"):
+        "Shape must be rank 0 but is rank 1(?s).*Bincount"):
       gen_math_ops.bincount([1, 2, 3, 1, 6, 8], [1], [])
     # size must be positive.
     with self.assertRaisesRegex((ValueError, errors.InvalidArgumentError),

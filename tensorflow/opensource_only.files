@@ -8,6 +8,7 @@ tensorflow/compiler/mlir/glob_lit_test.bzl
 tensorflow/compiler/mlir/hlo/WORKSPACE
 tensorflow/compiler/mlir/tfrt/transforms/tpu_passes.h
 tensorflow/core/tfrt/tpu/tpu_resources.h
+tensorflow/core/tfrt/utils/bridge_graph_analysis.h
 tensorflow/go/README.md
 tensorflow/go/op/wrappers.go
 tensorflow/java/README.md
@@ -204,7 +205,6 @@ third_party/mkl_dnn/mkldnn.BUILD
 third_party/mkl_dnn/mkldnn_acl.BUILD
 third_party/mkl_dnn/mkldnn_v1.BUILD
 third_party/mpi/.gitignore
-third_party/nanopb.BUILD
 third_party/nccl/BUILD
 third_party/nccl/LICENSE
 third_party/nccl/archive.BUILD
