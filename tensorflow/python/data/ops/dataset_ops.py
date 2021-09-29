@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Python wrappers for Datasets."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import abc
 import functools
 import multiprocessing
@@ -1079,11 +1075,8 @@ class DatasetV2(collections_abc.Iterable, tracking_base.Trackable,
 
           return structure.to_tensor_list(output_signature, values)
 
-        return script_ops._eager_py_func(  # pylint: disable=protected-access
-            generator_py_func,
-            inp=[iterator_id_t],
-            Tout=flat_output_types,
-            use_tape_cache=False)
+        return script_ops.eager_py_func(
+            generator_py_func, inp=[iterator_id_t], Tout=flat_output_types)
 
     def finalize_fn(iterator_id_t):
       """Releases host-side state for the iterator with ID `iterator_id_t`."""

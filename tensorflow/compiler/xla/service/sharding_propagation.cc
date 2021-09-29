@@ -147,6 +147,18 @@ bool IsConvolutionKernelSmall(const HloInstruction* instruction) {
   return true;
 }
 
+bool IsPassthroughCustomOps(const HloInstruction* hlo) {
+  if (hlo->operand_count() != 1 || !hlo->shape().IsArray() ||
+      !hlo->operand(0)->shape().IsArray() ||
+      hlo->operand(0)->shape().rank() != hlo->shape().rank()) {
+    return false;
+  }
+  return hlo->IsCustomCall("ResizeNearest") ||
+         hlo->IsCustomCall("ResizeBilinear") ||
+         hlo->IsCustomCall("ResizeNearestGrad") ||
+         hlo->IsCustomCall("ResizeBilinearGrad");
+}
+
 // Return the operand which is the most suitable for determining the sharding
 // for the specified instruction or nullptr if there isn't any suitable operand.
 const HloInstruction* PickRepresentativeOperand(
@@ -231,7 +243,12 @@ const HloInstruction* PickRepresentativeOperand(
       }
       return best_operand;
     }
-
+    case HloOpcode::kCustomCall: {
+      if (IsPassthroughCustomOps(instruction)) {
+        return instruction->operand(0);
+      }
+      return nullptr;
+    }
     // There is no suitable operand for the rest of the opcodes.
     case HloOpcode::kAddDependency:
     case HloOpcode::kAfterAll:
@@ -253,7 +270,6 @@ const HloInstruction* PickRepresentativeOperand(
     case HloOpcode::kConvolution:
     case HloOpcode::kCopyDone:
     case HloOpcode::kCopyStart:
-    case HloOpcode::kCustomCall:
     case HloOpcode::kDomain:
     case HloOpcode::kDot:
     case HloOpcode::kDynamicSlice:
@@ -346,6 +362,8 @@ bool SupportSpatialPartitioning(
              computation_map.end();
     case HloOpcode::kReverse:
       return is_spmd;
+    case HloOpcode::kCustomCall:
+      return is_spmd && IsPassthroughCustomOps(instruction);
     default:
       return false;
   }
@@ -1535,34 +1553,51 @@ int64_t ComputeNonRootUsers(const HloInstruction* instr) {
   return non_root_users;
 }
 
+// Only pass through sharding annotation at the first iteration when:
+//  1. Operand is sharded;  2. Only non-concat dim is sharded;
+//  3. Concat is for params in the repeated layers which follows the
+//     pattern of param/gte -> reshape -> concat.
+bool AggressiveConcatOperandShardingCanPassThrough(
+    const HloInstruction* concat_operand) {
+  return (
+      IsSpatiallyPartitioned(concat_operand) &&
+      (concat_operand->has_sharding() &&
+       concat_operand->sharding().NumTiles() > 1) &&
+      concat_operand->opcode() == HloOpcode::kReshape &&
+      (concat_operand->operand(0)->opcode() == HloOpcode::kParameter ||
+       concat_operand->operand(0)->opcode() == HloOpcode::kGetTupleElement));
+}
+
 // DyanmicSlice or DynamicUpdateSlice handling for InferShardingFromOperands().
 bool InferDynamicSliceOrDynamicUpdateSliceShardingFromOperands(
     HloInstruction* instruction, int64_t aggressiveness,
     bool may_combine_partial_sharding) {
-  auto propagate_slicing = [&]() {
-    const HloInstruction* operand =
-        instruction->opcode() == HloOpcode::kDynamicSlice
-            ? instruction->operand(0)
-            : instruction->operand(1);
-    auto slice_dim_is_sharded = [&]() {
-      if (!operand->has_sharding()) {
-        return true;
-      }
-      for (int64_t i = 0; i < instruction->shape().rank(); ++i) {
-        const auto& tile_assignment = operand->sharding().tile_assignment();
-        if (tile_assignment.dim(i) > 1 && instruction->shape().dimensions(i) !=
-                                              operand->shape().dimensions(i)) {
-          return true;
-        }
-      }
-      return false;
-    };
-
-    // Do not pass through sharding annotation at the first iteration
-    // if slice dim is sharded.
-    if (aggressiveness == 0 && slice_dim_is_sharded()) {
+  const HloInstruction* operand =
+      instruction->opcode() == HloOpcode::kDynamicSlice
+          ? instruction->operand(0)
+          : instruction->operand(1);
+  auto slice_dim_is_sharded = [&]() {
+    if (!IsSpatiallyPartitioned(operand) ||
+        operand->sharding().NumTiles() == 1) {
       return false;
     }
+    for (int64_t i = 0; i < instruction->shape().rank(); ++i) {
+      const auto& tile_assignment = operand->sharding().tile_assignment();
+      if (tile_assignment.dim(i) > 1 && instruction->shape().dimensions(i) !=
+                                            operand->shape().dimensions(i)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Do not pass through sharding annotation at the first iteration
+  // if slice dim is sharded.
+  if (aggressiveness == 0 && slice_dim_is_sharded()) {
+    return false;
+  }
+
+  auto propagate_slicing = [&]() {
     if (!IsSpatiallyPartitioned(operand)) {
       return false;
     }
@@ -1621,6 +1656,13 @@ bool ShardingPropagation::InferShardingFromOperands(
        instruction->opcode() == HloOpcode::kReduceWindow)) {
     for (const HloInstruction* op : instruction->operands()) {
       if (!op->has_sharding() || !op->sharding().IsManual()) continue;
+      // Do not pass through manual sharding to concat or dynamic slice when
+      // aggressiveneess is 0.
+      if (aggressiveness == 0 &&
+          (instruction->opcode() == HloOpcode::kConcatenate ||
+           instruction->opcode() == HloOpcode::kDynamicSlice)) {
+        return false;
+      }
       instruction->set_sharding(HloSharding::Manual(op->sharding().metadata()));
       return true;
     }
@@ -1844,14 +1886,18 @@ bool ShardingPropagation::InferShardingFromOperands(
         return false;
       }
 
-      // Do not pass through sharding annotation at the first iteration
-      // if concat dim is sharded.
-      if (aggressiveness == 0 && operand->has_sharding()) {
-        const auto& tile_assignment = operand->sharding().tile_assignment();
-        for (int64_t i = 0; i < instruction->shape().rank(); ++i) {
-          if (absl::c_linear_search(instruction->dimensions(), i) &&
-              tile_assignment.dim(i) > 1) {
+      if (aggressiveness == 0) {
+        for (const HloInstruction* concat_operand : instruction->operands()) {
+          if (!AggressiveConcatOperandShardingCanPassThrough(concat_operand)) {
             return false;
+          }
+          const auto& tile_assignment =
+              concat_operand->sharding().tile_assignment();
+          for (int64_t i = 0; i < instruction->shape().rank(); ++i) {
+            if (absl::c_linear_search(instruction->dimensions(), i) &&
+                tile_assignment.dim(i) > 1) {
+              return false;
+            }
           }
         }
       }

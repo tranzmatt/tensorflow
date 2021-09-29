@@ -4,8 +4,8 @@ load("//third_party:repo.bzl", "tf_http_archive")
 
 def repo(name):
     """Imports LLVM."""
-    LLVM_COMMIT = "f5b8f1247cd9d1b18b7b95f6f197d4d654597529"
-    LLVM_SHA256 = "96e57a2fe4090abf4b8c112110a9bec77eb7fb37b36dd77c63dc5eac7f71bdab"
+    LLVM_COMMIT = "6cffc35746b4a3a7a237bfde8bf84597fdb40328"
+    LLVM_SHA256 = "aa033cc542315d88a8b26351bab49d2384322cba6b5d370b1b4e44238f2c5d9d"
 
     tf_http_archive(
         name = name,
@@ -16,4 +16,5 @@ def repo(name):
             "https://github.com/llvm/llvm-project/archive/{commit}.tar.gz".format(commit = LLVM_COMMIT),
         ],
         build_file = "//third_party/llvm:BUILD.bazel",
+        link_files = {"//third_party/llvm:run_lit.sh": "mlir/run_lit.sh"},
     )

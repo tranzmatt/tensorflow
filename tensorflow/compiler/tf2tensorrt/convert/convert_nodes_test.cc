@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2tensorrt/convert/convert_nodes.h"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <type_traits>
@@ -319,7 +320,7 @@ TEST_F(ValidatorTest, ConvertToTensorOrWeights) {
   }
 
   // Helper method to run ConvertToTensorOrWeights() with predefined parameters.
-  auto convert_to_tensor_or_weights = [this](const std::vector<int64>& dims,
+  auto convert_to_tensor_or_weights = [this](const std::vector<int64_t>& dims,
                                              TRT_TensorOrWeights* output) {
     Scope s = Scope::NewRootScope();
     const auto attrs = ops::Placeholder::Shape(PartialTensorShape{dims});
@@ -333,7 +334,7 @@ TEST_F(ValidatorTest, ConvertToTensorOrWeights) {
     TRT_TensorOrWeights output;
     EXPECT_THAT(
         convert_to_tensor_or_weights(
-            std::vector<int64>(nvinfer1::Dims::MAX_DIMS + 2, 1), &output),
+            std::vector<int64_t>(nvinfer1::Dims::MAX_DIMS + 2, 1), &output),
         StatusIs(error::OUT_OF_RANGE,
                  HasSubstr("Input tensor rank is greater than 9")));
   }
@@ -1123,7 +1124,7 @@ class OpConverterTest : public ::testing::Test {
   template <typename T>
   Tensor AsTensor(gtl::ArraySlice<T> vals) {  // non-absl ok
     Tensor ret(tensor_buffer_allocator_.get(), DataTypeToEnum<T>::value,
-               {static_cast<int64>(vals.size())});
+               {static_cast<int64_t>(vals.size())});
     std::copy_n(vals.data(), vals.size(), ret.flat<T>().data());
     return ret;
   }
@@ -1133,7 +1134,7 @@ class OpConverterTest : public ::testing::Test {
   Tensor AsTensor(gtl::ArraySlice<T> vals,  // non-absl ok
                   const TensorShape& shape) {
     Tensor ret(tensor_buffer_allocator_.get(), DataTypeToEnum<T>::value,
-               {static_cast<int64>(vals.size())});
+               {static_cast<int64_t>(vals.size())});
     CHECK(ret.CopyFrom(AsTensor(vals), shape));
     return ret;
   }
@@ -1145,7 +1146,7 @@ class OpConverterTest : public ::testing::Test {
   Tensor AsTensor(std::vector<T> vals, const std::vector<int> input_dims,
                   DataType tf_type) {
     Tensor ret(tensor_buffer_allocator_.get(), tf_type,
-               {static_cast<int64>(vals.size())});
+               {static_cast<int64_t>(vals.size())});
     if (tf_type == DT_FLOAT) {
       auto conv_vals = CastVector<T, float>(vals);
       std::copy_n(conv_vals.data(), conv_vals.size(), ret.flat<float>().data());
@@ -1868,9 +1869,10 @@ TEST_F(OpConverterTest, ConvertConst) {
   }
   {
     Reset();
-    Tensor tensor = AsTensor<int64>({1, std::numeric_limits<int64>::max(), 1, 1,
-                                     1, std::numeric_limits<int64>::lowest()},
-                                    TensorShape({2, 3}));
+    Tensor tensor =
+        AsTensor<int64_t>({1, std::numeric_limits<int64_t>::max(), 1, 1, 1,
+                           std::numeric_limits<int64_t>::lowest()},
+                          TensorShape({2, 3}));
     NodeDef node_def;
     node_def.set_name("my_const");
     node_def.set_op("Const");
@@ -5816,7 +5818,7 @@ std::vector<float> CalcReduce(string op_name, std::vector<float> input, int m,
   }
   return output;
 }
-TEST_P(OpConverter_FP32_Test, ConvertReduce) {
+TEST_P(OpConverter_FP32_FP16_INT32_Test, ConvertReduce) {
   {
     // Input is weights, should fail.
     Reset();
@@ -5887,8 +5889,9 @@ TEST_P(OpConverter_FP32_Test, ConvertReduce) {
 
   for (bool keep_dims : {false, true}) {
     for (auto& op : op_test_info) {
+      VLOG(2) << "Processing " << op.name << " with keep_dims=" << keep_dims;
       for (auto p : params) {
-        SCOPED_TRACE(StrCat(op.name, keep_dims ? "keep_dims" : ""));
+        SCOPED_TRACE(StrCat(op.name, keep_dims ? " & keep_dims" : ""));
         Reset();
         NodeDef node_def = op.get_node(tf_type_, keep_dims);
 
@@ -5926,6 +5929,13 @@ TEST_P(OpConverter_FP32_Test, ConvertReduce) {
                                 "]");
         std::vector<float> expected_values = CalcReduce(
             op.name, p.helper_array, p.stride, op.val_func, op.init_val);
+
+        if (tf_type_ == DT_INT32) {
+          // We need to floor the float values in the `expected_values` vector.
+          std::for_each(expected_values.begin(), expected_values.end(),
+                        [](float& _n) { _n = std::floor(_n); });
+        }
+
         TestOpConverter("my_reduce", node_def, expected_output_dims,
                         p.conversion_status, Status::OK(),
                         ArrayFloatNear(expected_values));
