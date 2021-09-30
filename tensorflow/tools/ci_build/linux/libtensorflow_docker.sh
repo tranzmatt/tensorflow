@@ -36,7 +36,10 @@ DOCKER_BINARY="docker"
 if [ "${TF_NEED_CUDA}" == "1" ]; then
   DOCKER_IMAGE="tf-tensorflow-gpu"
   DOCKER_BINARY="nvidia-docker"
-  DOCKER_FILE="Dockerfile.rbe.cuda10.1-cudnn7-ubuntu16.04-manylinux2010"
+  #DOCKER_FILE="Dockerfile.rbe.cuda10.2-cudnn7-ubuntu18.04-manylinux2010"
+  #DOCKER_FILE="Dockerfile.rbe.cuda11.2-cudnn8.1-ubuntu18.04-manylinux2010-multipython"
+  #DOCKER_FILE="Dockerfile.rbe.cuda11.1-cudnn8-ubuntu18.04-manylinux2010-multipython"
+  DOCKER_FILE="Dockerfile.rbe.cuda11.1-cudnn8-ubuntu18.04-manylinux2010"
 fi
 if [ "${TF_NEED_ROCM}" == "1" ]; then
   DOCKER_IMAGE="tf-tensorflow-rocm"
@@ -48,6 +51,22 @@ docker build \
   -t "${DOCKER_IMAGE}" \
   -f "${DOCKER_CONTEXT_PATH}/${DOCKER_FILE}" \
   "${DOCKER_CONTEXT_PATH}"
+
+echo "================================="
+echo ${DOCKER_BINARY} run \
+  --rm \
+  --pid=host \
+  -v ${ROOT_DIR}:/workspace \
+  -w /workspace \
+  -e "PYTHON_BIN_PATH=/usr/bin/python" \
+  -e "TF_NEED_HDFS=0" \
+  -e "TF_NEED_CUDA=${TF_NEED_CUDA}" \
+  -e "TF_NEED_TENSORRT=${TF_NEED_CUDA}" \
+  -e "TF_CUDA_COMPUTE_CAPABILITIES=${TF_CUDA_COMPUTE_CAPABILITIES}" \
+  -e "TF_NEED_ROCM=${TF_NEED_ROCM}" \
+  "${DOCKER_IMAGE}" \
+  "/workspace/tensorflow/tools/ci_build/linux/libtensorflow.sh"
+echo "================================="
 
 ${DOCKER_BINARY} run \
   --rm \
