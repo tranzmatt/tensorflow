@@ -10,6 +10,7 @@ package_group(
     name = "friends",
     packages = [
         # copybara:uncomment "//learning/brain/experimental/tfrt/...",
+        # copybara:uncomment "//learning/brain/research/pjrt/...",
         # copybara:uncomment "//learning/brain/tfrt/...",
         "//tensorflow/c/eager/...",
         "//tensorflow/compiler/mlir/tfrt/...",
@@ -39,6 +40,7 @@ cc_library(
         "//tensorflow/core/platform:status",
         "//tensorflow/core/tfrt/eager:virtual_device",
         "//tensorflow/core/tpu:virtual_device",
+        "@tf_runtime//:bef",
         "@tf_runtime//:befexecutor",
         "@tf_runtime//:dtype",
         "@tf_runtime//:hostcontext",
