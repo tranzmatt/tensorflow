@@ -36,10 +36,9 @@ DOCKER_BINARY="docker"
 if [ "${TF_NEED_CUDA}" == "1" ]; then
   DOCKER_IMAGE="tf-tensorflow-gpu"
   DOCKER_BINARY="nvidia-docker"
+  #DOCKER_FILE="Dockerfile.rbe.cuda10.1-cudnn7-ubuntu16.04-manylinux2010"
   #DOCKER_FILE="Dockerfile.rbe.cuda10.2-cudnn7-ubuntu18.04-manylinux2010"
-  #DOCKER_FILE="Dockerfile.rbe.cuda11.2-cudnn8.1-ubuntu18.04-manylinux2010-multipython"
-  #DOCKER_FILE="Dockerfile.rbe.cuda11.1-cudnn8-ubuntu18.04-manylinux2010-multipython"
-  DOCKER_FILE="Dockerfile.rbe.cuda11.1-cudnn8-ubuntu18.04-manylinux2010"
+  DOCKER_FILE="Dockerfile.rbe.cuda11.4-cudnn8-ubuntu18.04-manylinux2010"
 fi
 if [ "${TF_NEED_ROCM}" == "1" ]; then
   DOCKER_IMAGE="tf-tensorflow-rocm"

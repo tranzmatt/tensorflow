@@ -80,6 +80,7 @@ COPY install/install_bazel.sh /install/
 RUN /install/install_bazel.sh
 
 COPY install/build_and_install_python.sh /install/
+RUN /install/build_and_install_python.sh "3.6.9"
 RUN /install/build_and_install_python.sh "3.7.7"
 RUN /install/build_and_install_python.sh "3.8.2"
 RUN /install/build_and_install_python.sh "3.9.4"

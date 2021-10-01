@@ -35,10 +35,9 @@ if [[ "$ubuntu_version" == "14" ]]; then
   # specifically for trusty linked from ffmpeg.org
   add-apt-repository -y ppa:mc3man/trusty-media
   apt-get update
-  apt-get dist-upgrade -y
-else
-  apt-get dist-upgrade -y
 fi
+
+apt-get dist-upgrade -y
 
 ## TODO(yifeif) remove ffmpeg once ffmpeg is removed from contrib
 apt-get install -y --no-install-recommends \
@@ -69,14 +68,11 @@ apt-get install -y --no-install-recommends \
 
 if [[ "$ubuntu_version" == "14" ]]; then
 apt-get install -y --no-install-recommends \
-    python-dev \
-    python-setuptools \
     python-virtualenv \
     openjdk-8-jdk \
     openjdk-8-jre-headless
 else
 apt-get install -y --no-install-recommends \
-    python3-venv \
     openjdk-11-jdk \
     openjdk-11-jre-headless
 fi
