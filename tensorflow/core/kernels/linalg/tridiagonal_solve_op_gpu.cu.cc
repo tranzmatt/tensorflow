@@ -27,9 +27,7 @@ limitations under the License.
 #include "tensorflow/core/kernels/transpose_functor.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/util/cuda_sparse.h"
-#include "tensorflow/core/util/gpu_device_functions.h"
 #include "tensorflow/core/util/gpu_kernel_helper.h"
-#include "tensorflow/core/util/gpu_launch_config.h"
 #include "tensorflow/core/util/gpu_solvers.h"
 
 namespace tensorflow {
@@ -66,7 +64,7 @@ __global__ void SolveForSizeOneOrTwoKernel(const int m,
 
 template <typename Scalar>
 se::DeviceMemory<Scalar> AsDeviceMemory(const Scalar* cuda_memory) {
-  se::DeviceMemoryBase wrapped(const_cast<Scalar*>(cuda_memory));
+  stream_executor::DeviceAddressBase wrapped(const_cast<Scalar*>(cuda_memory));
   se::DeviceMemory<Scalar> typed(wrapped);
   return typed;
 }
@@ -78,8 +76,8 @@ void CopyDeviceToDevice(OpKernelContext* context, const Scalar* src,
   auto dst_device_mem = AsDeviceMemory(dst);
   auto* stream = context->op_device_context()->stream();
   bool copy_status = stream
-                         ->ThenMemcpyD2D(&dst_device_mem, src_device_mem,
-                                         sizeof(Scalar) * num_elements)
+                         ->MemcpyD2D(&dst_device_mem, src_device_mem,
+                                     sizeof(Scalar) * num_elements)
                          .ok();
 
   if (!copy_status) {
@@ -255,9 +253,9 @@ class TridiagonalSolveOpGpu : public OpKernel {
     const Tensor& lhs = context->input(0);
     const Tensor& rhs = context->input(1);
     const int ndims = lhs.dims();
-    const int64 num_rhs = rhs.dim_size(rhs.dims() - 1);
-    const int64 matrix_size = lhs.dim_size(ndims - 1);
-    int64 batch_size = 1;
+    const int64_t num_rhs = rhs.dim_size(rhs.dims() - 1);
+    const int64_t matrix_size = lhs.dim_size(ndims - 1);
+    int64_t batch_size = 1;
     for (int i = 0; i < ndims - 2; i++) {
       batch_size *= lhs.dim_size(i);
     }
@@ -278,7 +276,8 @@ class TridiagonalSolveOpGpu : public OpKernel {
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(TridiagonalSolveOpGpu);
+  TridiagonalSolveOpGpu(const TridiagonalSolveOpGpu&) = delete;
+  void operator=(const TridiagonalSolveOpGpu&) = delete;
 
   void ComputeWithGtsvBatched(OpKernelContext* context, const Tensor& lhs,
                               const Tensor& rhs, const int batch_size) {
@@ -344,7 +343,7 @@ class TridiagonalSolveOpGpu : public OpKernel {
       dims.push_back(lhs.dim_size(index));
     }
     TensorShape lhs_transposed_shape(
-        gtl::ArraySlice<int64_t>(dims.data(), ndims));
+        absl::Span<const int64_t>(dims.data(), ndims));
 
     std::unique_ptr<GpuSolver> cublas_solver(new GpuSolver(context));
     OP_REQUIRES_OK(context, cublas_solver->allocate_scoped_tensor(
@@ -353,7 +352,7 @@ class TridiagonalSolveOpGpu : public OpKernel {
     auto device = context->eigen_device<Eigen::GpuDevice>();
     OP_REQUIRES_OK(
         context,
-        DoTranspose(device, lhs, gtl::ArraySlice<int>(perm.data(), ndims),
+        DoTranspose(device, lhs, absl::Span<const int>(perm.data(), ndims),
                     &lhs_transposed));
   }
 

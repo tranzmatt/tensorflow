@@ -19,16 +19,16 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "tensorflow/compiler/xla/service/computation_placer.h"
-#include "tensorflow/compiler/xla/service/executable.h"
-#include "tensorflow/compiler/xla/service/hlo.pb.h"
-#include "tensorflow/compiler/xla/statusor.h"
+#include "absl/status/statusor.h"
+#include "xla/service/computation_placer.h"
+#include "xla/service/executable.h"
+#include "xla/service/hlo.pb.h"
+#include "xla/stream_executor/stream.h"
+#include "xla/stream_executor/tpu/tpu_node_context.h"
+#include "xla/stream_executor/tpu/tpu_ops_c_api.h"
 #include "tensorflow/core/framework/cancellation.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/tpu/kernels/tpu_executable_info.pb.h"
-#include "tensorflow/core/tpu/tpu_ops_c_api.h"
-#include "tensorflow/stream_executor/stream.h"
-#include "tensorflow/stream_executor/tpu/tpu_node_context.h"
 
 namespace tensorflow {
 
@@ -37,12 +37,12 @@ namespace tensorflow {
 // `output_shape` is the output shape of the XLA computation from which
 // `program` was derived. If `session_module` is not nullptr, it will be filled
 // with the input and output literals of the execution.
-xla::StatusOr<xla::ExecutionOutput> TPUExecute(
+absl::StatusOr<xla::ExecutionOutput> TPUExecute(
     const TPUExecutableInfoProto& executable,
     const TPUHostTransferInfoProto& host_transfers,
     const xla::HloProto& hlo_metadata,
     std::vector<xla::ExecutionInput> arguments,
-    const std::string& rendezvous_key_base, uint32 rng_seed,
+    const std::string& rendezvous_key_base, uint32_t rng_seed,
     tpu::TpuNodeContext* node_context, xla::DeviceAssignment* device_assignment,
     CancellationManager* cancellation_manager, OpKernelContext* ctx,
     stream_executor::Stream* stream,

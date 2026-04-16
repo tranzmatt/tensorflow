@@ -114,7 +114,7 @@ __global__ void ResizeBilinearKernel_faster(
 
 template <typename T>
 __global__ void ResizeBilinearKernel(
-    const int32 nthreads, const T* __restrict__ images, float height_scale,
+    const int32_t nthreads, const T* __restrict__ images, float height_scale,
     float width_scale, int batch, int in_height, int in_width, int channels,
     int out_height, int out_width, float* __restrict__ output) {
   GPU_1D_KERNEL_LOOP(out_idx, nthreads) {
@@ -163,7 +163,7 @@ __global__ void ResizeBilinearKernel(
 }
 
 template <typename T>
-__global__ void ResizeBilinearGradKernel(const int32 nthreads,
+__global__ void ResizeBilinearGradKernel(const int32_t nthreads,
                                          const float* __restrict__ input_grad,
                                          float height_scale, float width_scale,
                                          int batch, int original_height,
@@ -229,7 +229,7 @@ __global__ void ResizeBilinearGradKernel(const int32 nthreads,
 
 template <typename T>
 __global__ void ResizeBilinearDeterministicGradKernel(
-    const int32 nthreads, const float* __restrict__ input_grad,
+    const int32_t nthreads, const float* __restrict__ input_grad,
     float height_scale, float inverse_height_scale, float width_scale,
     float inverse_width_scale, int batch, int original_height,
     int original_width, int channels, int resized_height, int resized_width,
@@ -252,7 +252,7 @@ __global__ void ResizeBilinearDeterministicGradKernel(
         max(0, __float2int_ru(
                    (out_x_center - 1 + offset) * inverse_width_scale - offset));
     const float out_x_start = (in_x_start + offset) * width_scale - offset;
-    T acc = 0;
+    T acc = T(0);
     // For clarity, prior to C++17, while loops are preferable to for loops here
     float out_y = out_y_start;
     int in_y = in_y_start;
@@ -282,7 +282,7 @@ __global__ void ResizeBilinearDeterministicGradKernel(
 
 template <typename T>
 __global__ void LegacyResizeBilinearKernel(
-    const int32 nthreads, const T* __restrict__ images, float height_scale,
+    const int32_t nthreads, const T* __restrict__ images, float height_scale,
     float width_scale, int batch, int in_height, int in_width, int channels,
     int out_height, int out_width, float* __restrict__ output) {
   GPU_1D_KERNEL_LOOP(out_idx, nthreads) {
@@ -332,7 +332,7 @@ __global__ void LegacyResizeBilinearKernel(
 
 template <typename T>
 __global__ void LegacyResizeBilinearGradKernel(
-    const int32 nthreads, const float* __restrict__ input_grad,
+    const int32_t nthreads, const float* __restrict__ input_grad,
     float height_scale, float width_scale, int batch, int original_height,
     int original_width, int channels, int resized_height, int resized_width,
     T* __restrict__ output_grad) {
@@ -515,7 +515,7 @@ TF_CALL_GPU_NUMBER_TYPES(DEFINE_GPU_SPEC);
 #define DEFINE_GRAD_GPU_SPEC(T) \
   template struct ResizeBilinearGrad<GPUDevice, T>;
 
-TF_CALL_GPU_NUMBER_TYPES_NO_HALF(DEFINE_GRAD_GPU_SPEC);
+TF_CALL_GPU_NUMBER_TYPES(DEFINE_GRAD_GPU_SPEC);
 
 #undef DEFINE_GPU_SPEC
 #undef DEFINE_GRAD_GPU_SPEC

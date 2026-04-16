@@ -17,10 +17,13 @@ limitations under the License.
 
 #include <numeric>
 #include <vector>
+
+#include <gtest/gtest.h>
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/tensor.pb.h"
+#include "tensorflow/core/framework/tensor_shape.pb.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
@@ -33,14 +36,14 @@ AttrValue V(T value) {
   return ret;
 }
 
-AttrValue P(const string& p) {
+AttrValue P(const std::string& p) {
   AttrValue ret;
   ret.set_placeholder(p);
   return ret;
 }
 
-AttrValue F(const string& name,
-            std::vector<std::pair<string, AttrValue>> pairs) {
+AttrValue F(const std::string& name,
+            std::vector<std::pair<std::string, AttrValue>> pairs) {
   AttrValue ret;
   ret.mutable_func()->set_name(name);
   ret.mutable_func()->mutable_attr()->insert(pairs.begin(), pairs.end());
@@ -48,7 +51,8 @@ AttrValue F(const string& name,
 }
 
 AttrValue Fs(
-    std::vector<std::pair<string, std::vector<std::pair<string, AttrValue>>>>
+    std::vector<
+        std::pair<std::string, std::vector<std::pair<std::string, AttrValue>>>>
         funcs) {
   AttrValue ret;
   for (const auto& func : funcs) {
@@ -79,7 +83,7 @@ TEST(AttrValueUtil, HasType) {
 }
 
 SubstituteFunc ReplaceTWith(const AttrValue& val) {
-  return [val](const string& placeholder, AttrValue* target) {
+  return [val](const std::string& placeholder, AttrValue* target) {
     if (placeholder == "T") {
       *target = val;
       return true;
@@ -139,14 +143,14 @@ TEST(AttrValueUtil, DeepAttr) {
 
 TEST(AttrValueUtil, SummarizeAttrValueDoesNotElideShortStrings) {
   AttrValue attr_value;
-  SetAttrValue(string(40, '-'), &attr_value);
-  EXPECT_EQ(strings::StrCat("\"", string(40, '-'), "\""),
+  SetAttrValue(std::string(40, '-'), &attr_value);
+  EXPECT_EQ(absl::StrCat("\"", std::string(40, '-'), "\""),
             SummarizeAttrValue(attr_value));
 }
 
 TEST(AttrValueUtil, SummarizeAttrValueElidesLongStrings) {
   AttrValue attr_value;
-  SetAttrValue(string(80, '-'), &attr_value);
+  SetAttrValue(std::string(80, '-'), &attr_value);
   EXPECT_EQ("\"----------...----------\"", SummarizeAttrValue(attr_value));
 }
 
@@ -160,16 +164,41 @@ TEST(AttrValueUtil, SummarizeAttrValueDoesNotElideShortLists) {
 }
 
 TEST(AttrValueUtil, SummarizeAttrValueElidesLongLists) {
-  std::vector<int> alist(60);
+  std::vector<int> alist(110);
   std::iota(alist.begin(), alist.end(), 0);
 
   AttrValue attr_value;
   SetAttrValue(alist, &attr_value);
-  EXPECT_EQ("[0, 1, 2, 3, 4, ..., 55, 56, 57, 58, 59]",
-            SummarizeAttrValue(attr_value));
+  EXPECT_EQ(
+      "[0, 1, 2, 3, 4, ..., 105, 106, 107, 108, "
+      "109]{attr_hash=14506120815048308275}",
+      SummarizeAttrValue(attr_value));
 }
 
-AttrValue FromText(const string& text) {
+TEST(AttrValueUtil, TensorByteSizeNumElementsOverflows) {
+  TensorProto proto;
+  proto.mutable_tensor_shape()->add_dim()->set_size(9223372036854775807L);
+  proto.mutable_tensor_shape()->add_dim()->set_size(2092026309338556617L);
+  proto.set_dtype(DT_INT32);
+  EXPECT_EQ(attr_value_util_internal::TensorByteSize(proto), -1);
+}
+
+TEST(AttrValueUtil, TensorByteSizeShouldNotOverflow) {
+  {
+    TensorProto proto;
+    proto.mutable_tensor_shape()->add_dim()->set_size(4611686018427387904L);
+    proto.set_dtype(DT_INT32);
+    EXPECT_EQ(attr_value_util_internal::TensorByteSize(proto), -1);
+  }
+  {
+    TensorProto proto;
+    proto.mutable_tensor_shape()->add_dim()->set_size(46123445412334L);
+    proto.set_dtype(DT_INT32);
+    EXPECT_NE(attr_value_util_internal::TensorByteSize(proto), -1);
+  }
+}
+
+AttrValue FromText(const std::string& text) {
   AttrValue attr;
   EXPECT_TRUE(protobuf::TextFormat::MergeFromString(text, &attr));
   return attr;

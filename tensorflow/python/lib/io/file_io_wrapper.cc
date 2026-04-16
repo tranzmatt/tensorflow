@@ -13,12 +13,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "pybind11/pybind11.h"
-#include "pybind11/stl.h"
+#include "absl/status/status.h"
+#include "absl/strings/string_view.h"
+#include "pybind11/pybind11.h"  // from @pybind11
+#include "pybind11/stl.h"  // from @pybind11
 #include "tensorflow/core/lib/core/error_codes.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -59,7 +63,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
   m.def(
       "FileExists",
       [](const std::string& filename, PyTransactionToken* token) {
-        tensorflow::Status status;
+        absl::Status status;
         {
           py::gil_scoped_release release;
           status = tensorflow::Env::Default()->FileExists(filename);
@@ -71,8 +75,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
       "DeleteFile",
       [](const std::string& filename, PyTransactionToken* token) {
         py::gil_scoped_release release;
-        tensorflow::Status status =
-            tensorflow::Env::Default()->DeleteFile(filename);
+        absl::Status status = tensorflow::Env::Default()->DeleteFile(filename);
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
       },
       py::arg("filename"), py::arg("token") = (PyTransactionToken*)nullptr);
@@ -90,7 +93,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
       py::arg("filename"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "WriteStringToFile",
-      [](const std::string& filename, tensorflow::StringPiece data,
+      [](const std::string& filename, absl::string_view data,
          PyTransactionToken* token) {
         py::gil_scoped_release release;
         const auto status =
@@ -128,7 +131,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
       [](const std::string& dirname, PyTransactionToken* token) {
         py::gil_scoped_release release;
         const auto status = tensorflow::Env::Default()->CreateDir(dirname);
-        if (tensorflow::errors::IsAlreadyExists(status)) {
+        if (absl::IsAlreadyExists(status)) {
           return;
         }
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
@@ -149,7 +152,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
          PyTransactionToken* token) {
         py::gil_scoped_release release;
         auto* env = tensorflow::Env::Default();
-        tensorflow::Status status;
+        absl::Status status;
         if (!overwrite && env->FileExists(target).ok()) {
           status = tensorflow::errors::AlreadyExists("file already exists");
         } else {
@@ -165,7 +168,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
          PyTransactionToken* token) {
         py::gil_scoped_release release;
         auto* env = tensorflow::Env::Default();
-        tensorflow::Status status;
+        absl::Status status;
         if (!overwrite && env->FileExists(target).ok()) {
           status = tensorflow::errors::AlreadyExists("file already exists");
         } else {
@@ -196,7 +199,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
         py::gil_scoped_release release;
         const auto status = tensorflow::Env::Default()->IsDirectory(dirname);
         // FAILED_PRECONDITION response means path exists but isn't a dir.
-        if (tensorflow::errors::IsFailedPrecondition(status)) {
+        if (absl::IsFailedPrecondition(status)) {
           return false;
         }
 
@@ -232,6 +235,16 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
       },
       py::arg("filename"), py::arg("token") = (PyTransactionToken*)nullptr);
 
+  m.def("GetRegisteredSchemes", []() {
+    std::vector<std::string> results;
+    py::gil_scoped_release release;
+    const auto status =
+        tensorflow::Env::Default()->GetRegisteredFileSystemSchemes(&results);
+    pybind11::gil_scoped_acquire acquire;
+    tensorflow::MaybeRaiseRegisteredFromStatus(status);
+    return results;
+  });
+
   using tensorflow::WritableFile;
   py::class_<WritableFile>(m, "WritableFile")
       .def(py::init([](const std::string& filename, const std::string& mode,
@@ -249,7 +262,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
            py::arg("filename"), py::arg("mode"),
            py::arg("token") = (PyTransactionToken*)nullptr)
       .def("append",
-           [](WritableFile* self, tensorflow::StringPiece data) {
+           [](WritableFile* self, absl::string_view data) {
              const auto status = self->Append(data);
              tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
            })
@@ -298,7 +311,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
              py::gil_scoped_release release;
              tensorflow::tstring result;
              const auto status = self->ReadNBytes(bytes_to_read, &result);
-             if (!status.ok() && !tensorflow::errors::IsOutOfRange(status)) {
+             if (!status.ok() && !absl::IsOutOfRange(status)) {
                result.clear();
                tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
              }

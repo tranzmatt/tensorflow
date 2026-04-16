@@ -24,10 +24,12 @@ from tensorflow.core.protobuf import config_pb2
 from tensorflow.core.util import event_pb2
 from tensorflow.python.client import session as session_lib
 from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.distribute import collective_all_reduce_strategy as mwms_lib
 from tensorflow.python.distribute import distribute_lib
 from tensorflow.python.distribute import distribute_utils
-from tensorflow.python.distribute import distribution_strategy_context as ds_context
+from tensorflow.python.distribute import mirrored_strategy as mirrored_lib
 from tensorflow.python.distribute import reduce_util
+from tensorflow.python.distribute import tpu_strategy
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
@@ -38,12 +40,13 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.lib.io import tf_record
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import gen_math_ops
 from tensorflow.python.ops import gradients_impl
 from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import init_ops_v2
+from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import summary_ops_v2 as summary_ops
 from tensorflow.python.ops import variable_scope
+from tensorflow.python.ops import variable_v1
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import gfile
 from tensorflow.python.training import optimizer
@@ -74,7 +77,7 @@ def _raise_exception_fn(_=None):
 # Must be the argument to a distribution.extended.call_for_each_replica() call,
 # calls a get_replica_context().merge_call() that raises an exception.
 def _merge_raises_fn():
-  ds_context.get_replica_context().merge_call(_raise_exception_fn)
+  distribute_lib.get_replica_context().merge_call(_raise_exception_fn)
 
 
 # Must be the argument to a get_replica_context().merge_call() call, calls
@@ -88,7 +91,7 @@ def _call_raises_fn(dist):
 # calls a get_replica_context().merge_call() that calls a
 # call_for_each_replica() that raises an exception.
 def _merge_call_raises_fn():
-  ds_context.get_replica_context().merge_call(_call_raises_fn)
+  distribute_lib.get_replica_context().merge_call(_call_raises_fn)
 
 
 # Must be the argument to a get_replica_context().merge_call() call, calls
@@ -103,7 +106,7 @@ def _call_merge_raises_fn(dist):
 # call_for_each_replica() that calls a get_replica_context().merge_call() that
 # raises an exception.
 def _merge_call_merge_raises_fn():
-  ds_context.get_replica_context().merge_call(_call_merge_raises_fn)
+  distribute_lib.get_replica_context().merge_call(_call_merge_raises_fn)
 
 
 def _events_from_logdir(test_case, logdir):
@@ -121,7 +124,7 @@ def _events_from_logdir(test_case, logdir):
 
 
 def create_variable_like_keras_layer(name, shape, dtype):
-  """Utitlity for create variables that works like variable in keras layer."""
+  """Utility for create variables that works like variable in keras layer."""
   initializer = functools.partial(
       init_ops_v2.GlorotUniform(), shape, dtype=dtype)
   return variables.Variable(
@@ -135,6 +138,24 @@ def is_optimizer_v2_instance(optimizer_obj):
   return "var_list" in arg_spec.args[:-len(arg_spec.defaults)]
 
 
+def is_mirrored_strategy(strategy: distribute_lib.Strategy) -> bool:
+  return isinstance(
+      strategy,
+      (mirrored_lib.MirroredStrategy, mirrored_lib.MirroredStrategyV1))
+
+
+def is_multi_worker_mirrored_strategy(
+    strategy: distribute_lib.Strategy) -> bool:
+  return isinstance(strategy, (mwms_lib.CollectiveAllReduceStrategy,
+                               mwms_lib.CollectiveAllReduceStrategyV1))
+
+
+def is_tpu_strategy(strategy: distribute_lib.Strategy) -> bool:
+  return isinstance(strategy,
+                    (tpu_strategy.TPUStrategy, tpu_strategy.TPUStrategyV1,
+                     tpu_strategy.TPUStrategyV2))
+
+
 class DistributionTestBase(test.TestCase):
   """Some tests that should work with any DistributionStrategy."""
 
@@ -144,7 +165,7 @@ class DistributionTestBase(test.TestCase):
           name="kernel", shape=(1, 1), dtype=dtypes.float32)
       def loss(x):
         y = array_ops.reshape(
-            gen_math_ops.mat_mul(x, kernel), []) - array_ops.identity(1.)
+            math_ops.mat_mul(x, kernel), []) - array_ops.identity(1.)
         return y * y
       # TODO(isaprykin): Extract implicit_grad+get_filtered_grad_fn into a
       # common `implicit_grad` function and put it in DistributionStrategy.
@@ -203,7 +224,7 @@ class DistributionTestBase(test.TestCase):
 
       def loss(x):
         y = array_ops.reshape(
-            gen_math_ops.mat_mul(x, kernel), []) - array_ops.identity(1.)
+            math_ops.mat_mul(x, kernel), []) - array_ops.identity(1.)
         return y * y
 
       grad_fn = backprop.implicit_grad(loss)
@@ -251,7 +272,7 @@ class DistributionTestBase(test.TestCase):
     def run_fn():
       """Function executed for each replica."""
       with summary_writer.as_default():
-        replica_id = ds_context.get_replica_context().replica_id_in_sync_group
+        replica_id = distribute_lib.get_replica_context().replica_id_in_sync_group
         return summary_ops.write("a", replica_id)
 
     with self.cached_session() as sess, d.scope(), \
@@ -285,7 +306,7 @@ class DistributionTestBase(test.TestCase):
 
       def mark_devices_fn():
         replica_id = self.evaluate(
-            ds_context.get_replica_context().replica_id_in_sync_group)
+            distribute_lib.get_replica_context().replica_id_in_sync_group)
         self.assertLess(replica_id, len(d.extended.worker_devices))
         self.assertFalse(expected_devices[replica_id])
         expected_devices[replica_id] = True
@@ -464,7 +485,7 @@ class DistributionTestBase(test.TestCase):
         run_and_concatenate(strategy, i)
 
   def _test_trainable_variable(self, strategy):
-    for cls in [variables.VariableV1, variables.Variable]:
+    for cls in [variable_v1.VariableV1, variables.Variable]:
       with strategy.scope():
         v1 = cls(1.0)
         self.assertEqual(True, v1.trainable)
@@ -607,7 +628,7 @@ class TwoDeviceDistributionTestBase(test.TestCase):
 
   def _test_run(self, strategy, run_in_function=False):
     out1 = strategy.run(_maybe_run_in_function(
-        lambda: ds_context.get_replica_context().replica_id_in_sync_group + 1,
+        lambda: distribute_lib.get_replica_context().replica_id_in_sync_group + 1,
         run_in_function))
     self.assertAllEqual([1, 2], self.evaluate(strategy.unwrap(out1)))
 
@@ -795,10 +816,10 @@ class RemoteSingleWorkerMirroredStrategyBase(DistributionTestBase):
 
 
 def _all_sum(value):
-  ctx = ds_context.get_replica_context()
+  ctx = distribute_lib.get_replica_context()
   return ctx.all_reduce(reduce_util.ReduceOp.SUM, value)
 
 
 def _all_mean(value):
-  ctx = ds_context.get_replica_context()
+  ctx = distribute_lib.get_replica_context()
   return ctx.all_reduce(reduce_util.ReduceOp.MEAN, value)

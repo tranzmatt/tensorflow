@@ -16,7 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_IMAGE_MIRROR_PAD_OP_H_
 #define TENSORFLOW_CORE_KERNELS_IMAGE_MIRROR_PAD_OP_H_
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -33,7 +33,7 @@ struct traits<TensorMirrorPadOp<PaddingDimensions, XprType>>
   typedef typename XprTraits::StorageKind StorageKind;
   typedef typename XprTraits::Index Index;
   typedef typename XprType::Nested Nested;
-  typedef typename remove_reference<Nested>::type _Nested;
+  typedef std::remove_reference_t<Nested> _Nested;
   static constexpr int NumDimensions = XprTraits::NumDimensions;
   static constexpr int Layout = XprTraits::Layout;
 };
@@ -114,8 +114,7 @@ struct TensorEvaluator<const TensorMirrorPadOp<PaddingDimensions, ArgType>,
   typedef internal::TensorBlockNotImplemented TensorBlock;
   //===--------------------------------------------------------------------===//
 
-  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE TensorEvaluator(const XprType& op,
-                                                        const Device& device)
+  EIGEN_STRONG_INLINE TensorEvaluator(const XprType& op, const Device& device)
       : impl_(op.expression(), device), padding_(op.padding()) {
     EIGEN_STATIC_ASSERT(Dims > 0, YOU_MADE_A_PROGRAMMING_MISTAKE)
 
@@ -156,12 +155,12 @@ struct TensorEvaluator<const TensorMirrorPadOp<PaddingDimensions, ArgType>,
     return dimensions_;
   }
 
-  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE bool evalSubExprsIfNeeded(Scalar*) {
+  EIGEN_STRONG_INLINE bool evalSubExprsIfNeeded(Scalar*) {
     impl_.evalSubExprsIfNeeded(nullptr);
     return true;
   }
 
-  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void cleanup() { impl_.cleanup(); }
+  EIGEN_STRONG_INLINE void cleanup() { impl_.cleanup(); }
 
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE CoeffReturnType
   coeff(Index index) const {
@@ -229,8 +228,7 @@ struct TensorEvaluator<const TensorMirrorPadOp<PaddingDimensions, ArgType>,
     }
 
     // If the road is not contiguous, then fall back to coeff().
-    EIGEN_ALIGN_MAX typename internal::remove_const<CoeffReturnType>::type
-        values[kPacketSize];
+    EIGEN_ALIGN_MAX std::remove_const_t<CoeffReturnType> values[kPacketSize];
     values[0] = impl_.coeff(input_index);
     for (int i = 1; i < kPacketSize; ++i) {
       values[i] = coeff(index + i);
@@ -345,13 +343,13 @@ namespace functor {
 template <typename Device, typename T, typename Tpaddings, int Dims>
 struct MirrorPad {
   void operator()(const Device& device,
-                  typename TTypes<T, Dims, int32>::Tensor output,
-                  typename TTypes<T, Dims, int32>::ConstTensor input,
+                  typename TTypes<T, Dims, int32_t>::Tensor output,
+                  typename TTypes<T, Dims, int32_t>::ConstTensor input,
                   typename TTypes<Tpaddings>::ConstMatrix padding, int offset) {
-    Eigen::array<Eigen::IndexPair<int32>, Dims> padding_dims;
+    Eigen::array<Eigen::IndexPair<int32_t>, Dims> padding_dims;
 
     for (int i = 0; i < Dims; ++i) {
-      padding_dims[i] = Eigen::IndexPair<int32>(padding(i, 0), padding(i, 1));
+      padding_dims[i] = Eigen::IndexPair<int32_t>(padding(i, 0), padding(i, 1));
     }
 
     output.device(device) = MirrorPadOp(input, padding_dims, offset);
@@ -372,16 +370,16 @@ struct MirrorPad {
 template <typename Device, typename T, typename Tpaddings, int Dims>
 struct MirrorPadGrad {
   void operator()(const Device& device,
-                  typename TTypes<T, Dims, int32>::Tensor output,
-                  typename TTypes<T, Dims, int32>::ConstTensor input,
+                  typename TTypes<T, Dims, int32_t>::Tensor output,
+                  typename TTypes<T, Dims, int32_t>::ConstTensor input,
                   typename TTypes<Tpaddings>::ConstMatrix paddings, int offset,
-                  typename TTypes<T, Dims, int32>::Tensor scratch) {
+                  typename TTypes<T, Dims, int32_t>::Tensor scratch) {
     // Copy the gradient input into the scratch buffer.
     scratch.device(device) = input;
 
-    Eigen::array<int32, Dims> lhs_offsets;
-    Eigen::array<int32, Dims> rhs_offsets;
-    Eigen::array<int32, Dims> extents;
+    Eigen::array<int32_t, Dims> lhs_offsets;
+    Eigen::array<int32_t, Dims> rhs_offsets;
+    Eigen::array<int32_t, Dims> extents;
     Eigen::array<bool, Dims> reverses;
 
     for (int i = 0; i < Dims; ++i) {

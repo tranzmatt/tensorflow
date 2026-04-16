@@ -13,14 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <algorithm>
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/slicing.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/lib/slicing.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/xla_data.pb.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/util/tensor_format.h"
 
@@ -31,17 +37,17 @@ class DataFormatDimMapOp : public XlaOpKernel {
  public:
   explicit DataFormatDimMapOp(OpKernelConstruction* context)
       : XlaOpKernel(context) {
-    string src_format;
+    std::string src_format;
     OP_REQUIRES_OK(context, context->GetAttr("src_format", &src_format));
-    string dst_format;
+    std::string dst_format;
     OP_REQUIRES_OK(context, context->GetAttr("dst_format", &dst_format));
-    OP_REQUIRES(context, src_format.size() == 4 or src_format.size() == 5,
+    OP_REQUIRES(context, src_format.size() == 4 || src_format.size() == 5,
                 errors::InvalidArgument(
                     absl::StrCat("Source format must of length 4 or 5, "
                                  "received src_format = ",
                                  src_format)));
     OP_REQUIRES(
-        context, dst_format.size() == 4 or dst_format.size() == 5,
+        context, dst_format.size() == 4 || dst_format.size() == 5,
         errors::InvalidArgument(absl::StrCat(
             "Destination format must of length 4 or 5, received dst_format = ",
             dst_format)));
@@ -64,9 +70,9 @@ class DataFormatDimMapOp : public XlaOpKernel {
   void Compile(XlaOpKernelContext* context) override {
     auto builder = context->builder();
     xla::XlaOp dst_indices =
-        xla::ConstantR1(builder, absl::Span<const int32>(dst_idx_));
+        xla::ConstantR1(builder, absl::Span<const int32_t>(dst_idx_));
     const int dims = dst_idx_.size();
-    xla::XlaOp rank = xla::ConstantR0<int32>(builder, dims);
+    xla::XlaOp rank = xla::ConstantR0<int32_t>(builder, dims);
     xla::XlaOp src_indices =
         (xla::ConvertElementType(context->Input(0), xla::S32) + rank) % rank;
     xla::XlaOp output =
@@ -76,9 +82,10 @@ class DataFormatDimMapOp : public XlaOpKernel {
   }
 
  private:
-  std::vector<int32> dst_idx_;
+  std::vector<int32_t> dst_idx_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(DataFormatDimMapOp);
+  DataFormatDimMapOp(const DataFormatDimMapOp&) = delete;
+  void operator=(const DataFormatDimMapOp&) = delete;
 };
 
 REGISTER_XLA_OP(
@@ -140,13 +147,13 @@ class DataFormatVecPermuteOp : public XlaOpKernel {
               input_tensor_shape.DebugString()));
     }
 
-    string src_format_str = src_format_;
-    string dst_format_str = dst_format_;
+    std::string src_format_str = src_format_;
+    std::string dst_format_str = dst_format_;
     if (input_tensor_shape.dim_size(0) == spatial_dim_count) {
       // If the input is a vector of size spatial_dim_count, treat the elements
       // as spatial dimensions.
       auto keep_only_spatial_dimensions =
-          [spatial_dim_count](string* format_str) -> void {
+          [spatial_dim_count](std::string* format_str) -> void {
         auto new_end =
             std::remove_if(format_str->begin(), format_str->end(),
                            [spatial_dim_count](const char dim) {
@@ -158,7 +165,7 @@ class DataFormatVecPermuteOp : public XlaOpKernel {
       keep_only_spatial_dimensions(&src_format_str);
       keep_only_spatial_dimensions(&dst_format_str);
     }
-    std::vector<int32> dst_indices(dim0);
+    std::vector<int32_t> dst_indices(dim0);
     for (int i = 0; i < dim0; ++i) {
       for (int j = 0; j < dim0; ++j) {
         if (src_format_str[i] == dst_format_str[j]) {
@@ -168,16 +175,17 @@ class DataFormatVecPermuteOp : public XlaOpKernel {
       }
     }
     xla::XlaOp indices =
-        xla::ConstantR1(builder, absl::Span<const int32>(dst_indices));
+        xla::ConstantR1(builder, absl::Span<const int32_t>(dst_indices));
     xla::XlaOp output = xla::TorchIndexSelect(ctx->Input(0), indices, 0);
     ctx->SetOutput(0, output);
   }
 
  private:
-  string src_format_;
-  string dst_format_;
+  std::string src_format_;
+  std::string dst_format_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(DataFormatVecPermuteOp);
+  DataFormatVecPermuteOp(const DataFormatVecPermuteOp&) = delete;
+  void operator=(const DataFormatVecPermuteOp&) = delete;
 };
 
 REGISTER_XLA_OP(

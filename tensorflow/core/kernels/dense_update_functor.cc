@@ -31,7 +31,7 @@ typedef Eigen::GpuDevice GPUDevice;
 namespace functor {
 
 template <>
-struct DenseUpdate<CPUDevice, string, ASSIGN> {
+struct DenseUpdate<CPUDevice, std::string, ASSIGN> {
   void operator()(const CPUDevice& d, typename TTypes<tstring>::Flat params,
                   typename TTypes<tstring>::ConstFlat update) {
     if (params.dimension(0) == 1) {
@@ -99,7 +99,7 @@ struct DenseUpdate<CPUDevice, string, ASSIGN> {
             " using device: ", context->device()->name());                    \
     }                                                                         \
     *to = tensor;                                                             \
-    return Status::OK();                                                      \
+    return OkStatus();                                                        \
   }
 
 INSTANTIATE_GET_VARIANT_COPY_FN(CPUDevice, TF_CALL_ALL_TYPES, CPU_DENSE_COPY);

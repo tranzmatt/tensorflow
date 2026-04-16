@@ -16,11 +16,13 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "absl/strings/str_cat.h"
+#include "xla/stream_executor/tpu/tpu_ops_c_api.h"
+#include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/tpu/tpu_compile_interface.h"
-#include "tensorflow/core/tpu/tpu_ops_c_api.h"
 
 namespace tensorflow {
 namespace tpu {
@@ -71,8 +73,8 @@ std::string CreateConfigPrefix(const TPUCompileMetadataProto& metadata) {
 }
 }  // namespace
 
-uint64 CreateFingerprintWithNameAndShapes(
-    uint64 name, const std::vector<tensorflow::TensorShape>& shapes) {
+uint64_t CreateFingerprintWithNameAndShapes(
+    uint64_t name, const std::vector<tensorflow::TensorShape>& shapes) {
   std::string shape_prefix = CreateShapePrefix(shapes);
   VLOG(2) << "CreateFingerprintWithNameAndShapes, name: " << name
           << ", shape_prefix: " << shape_prefix;
@@ -83,15 +85,15 @@ uint64 CreateFingerprintWithNameAndShapes(
 // Return fingerprint_in_metadata if it's not empty; otherwise read input tensor
 // data to compute the fingerprint.
 std::string GuaranteedConstFingerprint(
-    const string& fingerprint_in_metadata,
+    const std::string& fingerprint_in_metadata,
     const OpInputList& guaranteed_constants) {
   if (fingerprint_in_metadata.empty()) {
     uint64_t fingerprint = 0;
     for (const Tensor& constant : guaranteed_constants) {
-      fingerprint =
-          tpu::OpsApiFn()->TpuCompile_CreateGuaranteedConstFingerprintFn(
-              fingerprint, constant.tensor_data().data(),
-              constant.tensor_data().size());
+      fingerprint = stream_executor::tpu::OpsApiFn()
+                        ->TpuCompile_CreateGuaranteedConstFingerprintFn(
+                            fingerprint, constant.tensor_data().data(),
+                            constant.tensor_data().size());
     }
     return std::to_string(fingerprint);
   } else {
@@ -102,11 +104,12 @@ std::string GuaranteedConstFingerprint(
 // The `guaranteed_constants` must be passed as reference due to the lazy
 // evaluation of `guaranteed_const_fingerprint()` callback.
 TpuCompilationCacheKey CreateCompilationCacheKey(
-    absl::string_view function_name, uint64 function_library_fingerprint,
-    uint64 mlir_module_fingerprint, const OpInputList& guaranteed_constants,
+    absl::string_view function_name, uint64_t function_library_fingerprint,
+    uint64_t mlir_module_fingerprint, const OpInputList& guaranteed_constants,
     const std::vector<TensorShape>& dynamic_shapes,
     const TPUCompileMetadataProto& metadata,
-    const TpuMeshStateInterface& mesh_state) {
+    const TpuMeshStateInterface& mesh_state, uint64_t session_id,
+    ResourceMgr* resource_mgr) {
   VLOG(1) << "FunctionLibraryFingerprint:" << function_library_fingerprint;
   std::string shapes_prefix = CreateShapePrefix(dynamic_shapes);
   VLOG(1) << "shapes_prefix = " << shapes_prefix;
@@ -122,26 +125,22 @@ TpuCompilationCacheKey CreateCompilationCacheKey(
     }
   }
   CompilationCacheKeyResult result =
-      tpu::OpsApiFn()->TpuCompile_CreateCompilationCacheKeyFn(
+      stream_executor::tpu::OpsApiFn()->TpuCompile_CreateCompilationCacheKeyFn(
           CompilationCacheKeyProperty{
-              config_prefix.data(),
-              shapes_prefix.data(),
-              function_name.data(),
-              mlir_module_fingerprint,
-              flattened_device_ids.data(),
-              flattened_device_ids.size(),
-              guaranteed_constants.size(),
-              function_library_fingerprint,
-              metadata.num_cores_per_replica(),
-              metadata.num_replicas(),
-              mesh_state.data(),
-          });
+              config_prefix.data(), shapes_prefix.data(), function_name.data(),
+              mlir_module_fingerprint, flattened_device_ids.data(),
+              flattened_device_ids.size(), guaranteed_constants.size(),
+              function_library_fingerprint, metadata.num_cores_per_replica(),
+              metadata.num_replicas(), mesh_state.data(), session_id,
+              resource_mgr});
   auto buffer_cleanup = gtl::MakeCleanup([result]() {
-    tpu::OpsApiFn()->TpuCompile_DestroyCompilationCacheKeyFn(result);
+    stream_executor::tpu::OpsApiFn()->TpuCompile_DestroyCompilationCacheKeyFn(
+        result);
   });
   TpuCompilationCacheKey key;
   key.prefix = result.key;
   key.debug_string = result.debug_string;
+  key.session_id = session_id;
 
   // Guaranteed constants can be different across sessions. Use session_handle
   // and guaranteed_const fingerprint to guarantee no collision.
@@ -152,7 +151,7 @@ TpuCompilationCacheKey CreateCompilationCacheKey(
     // reference based on the assumption that these variables lifetime is
     // managed through the `TPUCompileOpKernelImpl` that outlives the
     // lifetime of the compilation cache lookups.
-    string fingerprint;
+    std::string fingerprint;
     key.guaranteed_const_fingerprint = [&metadata, &guaranteed_constants,
                                         fingerprint]() mutable {
       if (fingerprint.empty()) {

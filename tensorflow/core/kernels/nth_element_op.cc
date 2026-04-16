@@ -43,7 +43,7 @@ class NthElementOp : public OpKernel {
     OP_REQUIRES(
         context, TensorShapeUtils::IsScalar(n_in.shape()),
         errors::InvalidArgument("N must be scalar but has rank ", n_in.dims()));
-    int n = n_in.scalar<int32>()();
+    int n = n_in.scalar<int32_t>()();
     OP_REQUIRES(context, n >= 0,
                 errors::InvalidArgument("n must be non-negative but is ", n));
 
@@ -66,7 +66,7 @@ class NthElementOp : public OpKernel {
     // Assume input_shape is [d1,d2,...dk], and output_shape is [d1,d2...dk-1].
     TensorShape out_shape;
     for (int i = 0; i < num_dims - 1; ++i) {
-      out_shape.AddDim(input_in.dim_size(i));
+      OP_REQUIRES_OK(context, out_shape.AddDimWithStatus(input_in.dim_size(i)));
     }
     Tensor* output_tensor = nullptr;
     OP_REQUIRES_OK(context,

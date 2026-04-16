@@ -3,6 +3,7 @@
 load("@build_bazel_rules_android//android:rules.bzl", "android_binary")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     licenses = ["notice"],
 )
 
@@ -29,7 +30,5 @@ android_binary(
         "//tensorflow/lite/java:tensorflowlite",
         "//tensorflow/lite/java/ovic:ovicbenchmarkerlib",
         "//tensorflow/lite/java/ovic:ovicdetectionbenchmarkerlib",
-        "@androidsdk//com.android.support:support-v13-25.2.0",
-        "@androidsdk//com.android.support:support-v4-25.2.0",
     ],
 )

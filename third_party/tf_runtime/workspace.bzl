@@ -1,23 +1,20 @@
 """Provides the repository macro to import TFRT."""
 
-load("//third_party:repo.bzl", "tf_http_archive")
+load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 
 def repo():
     """Imports TFRT."""
 
     # Attention: tools parse and update these lines.
-    TFRT_COMMIT = "eaf402e0cb24f2d9bcad3a6ea4bf2d1a5345ff67"
-    TFRT_SHA256 = "fb92666e20365bde7fdc72267637e8ec2182e1e5e40860d154b5b9e0d863d671"
+    TFRT_COMMIT = "4ecc3a44a32c832b748328bed3f9a599f795ca8d"
+    TFRT_SHA256 = "5e81d70f9534340f7ef8e63ec43bdd5971135e48183079be50ecb3f74b1fed66"
 
     tf_http_archive(
         name = "tf_runtime",
         sha256 = TFRT_SHA256,
         strip_prefix = "runtime-{commit}".format(commit = TFRT_COMMIT),
-        urls = [
-            "http://mirror.tensorflow.org/github.com/tensorflow/runtime/archive/{commit}.tar.gz".format(commit = TFRT_COMMIT),
-            "https://github.com/tensorflow/runtime/archive/{commit}.tar.gz".format(commit = TFRT_COMMIT),
-        ],
+        urls = tf_mirror_urls("https://github.com/tensorflow/runtime/archive/{commit}.tar.gz".format(commit = TFRT_COMMIT)),
         # A patch file can be provided for atomic commits to both TF and TFRT.
         # The job that bumps the TFRT_COMMIT also resets patch_file to 'None'.
-        patch_file = None,
+        patch_file = ["//third_party/tf_runtime:f16_attr.patch"],
     )

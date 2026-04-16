@@ -18,10 +18,11 @@ limitations under the License.
 #define EIGEN_USE_GPU
 #endif
 
+#include <limits>
 #include <numeric>
 
-#include "third_party/eigen3/Eigen/Core"
-#include "third_party/eigen3/Eigen/LU"
+#include "Eigen/Core"  // from @eigen_archive
+#include "Eigen/LU"  // from @eigen_archive
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -32,7 +33,7 @@ limitations under the License.
 #include "tensorflow/core/platform/types.h"
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/kernels/transpose_functor.h"
 #include "tensorflow/core/util/gpu_solvers.h"
 #endif
@@ -66,8 +67,9 @@ class MatrixSolveOp : public LinearAlgebraOp<Scalar> {
     double rows = static_cast<double>(input_matrix_shapes[0].dim_size(0));
     double num_rhss = static_cast<double>(input_matrix_shapes[1].dim_size(1));
     double cost = rows * rows * (rows + num_rhss);
-    return cost >= static_cast<double>(kint64max) ? kint64max
-                                                  : static_cast<int64_t>(cost);
+    return cost >= static_cast<double>(std::numeric_limits<int64_t>::max())
+               ? std::numeric_limits<int64_t>::max()
+               : static_cast<int64_t>(cost);
   }
 
   bool EnableInputForwarding() const final { return false; }
@@ -111,7 +113,8 @@ class MatrixSolveOp : public LinearAlgebraOp<Scalar> {
  private:
   bool adjoint_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(MatrixSolveOp);
+  MatrixSolveOp(const MatrixSolveOp&) = delete;
+  void operator=(const MatrixSolveOp&) = delete;
 };
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -218,7 +221,7 @@ class MatrixSolveOpGpu : public AsyncOpKernel {
     // 1. Compute the partially pivoted LU factorization(s) of the
     // matrix/matrices.
     std::vector<DeviceLapackInfo> dev_info;
-    auto input_copy_ptrs = solver->GetScratchSpace<uint8>(
+    auto input_copy_ptrs = solver->GetScratchSpace<uint8_t>(
         sizeof(Scalar*) * batch_size, "input_copt_ptrs",
         /* on_host */ true);
     const int kMaxMatrixSizeToBatchSizeRatio = 128;
@@ -280,9 +283,15 @@ class MatrixSolveOpGpu : public AsyncOpKernel {
     }
 #if GOOGLE_CUDA
     auto op_t = adjoint_ ? CUBLAS_OP_C : CUBLAS_OP_T;
+    auto opbatch_t = op_t;
 #else  // TENSORFLOW_USE_ROCM
-    auto op_t = adjoint_ ? rocblas_operation_conjugate_transpose
-                         : rocblas_operation_transpose;
+    auto opbatch_t = adjoint_ ? rocblas_operation_conjugate_transpose
+                              : rocblas_operation_transpose;
+#if TF_ROCM_VERSION >= 40500
+    auto op_t = adjoint_ ? HIPSOLVER_OP_C : HIPSOLVER_OP_T;
+#else
+    auto op_t = opbatch_t;
+#endif
 #endif
 
     // 3. Solve op(A) X = B (in column major form).
@@ -292,10 +301,10 @@ class MatrixSolveOpGpu : public AsyncOpKernel {
     // fly. (This means that we actually use the LU-factorization of A^T in that
     // case, but that is equally good for solving AX=B). This way we save an
     // explicit transpose in the more common case of adjoint_ == false.
-    auto input_copy_ptr_array = solver->GetScratchSpace<uint8>(
+    auto input_copy_ptr_array = solver->GetScratchSpace<uint8_t>(
         sizeof(Scalar*) * batch_size, "input_copy_ptr_array",
         /* on_host */ true);
-    auto transposed_rhs_ptr_array = solver->GetScratchSpace<uint8>(
+    auto transposed_rhs_ptr_array = solver->GetScratchSpace<uint8_t>(
         sizeof(Scalar*) * batch_size, "transposed_rhs_ptr_array",
         /* on_host */ true);
     auto transposed_rhs_reshaped =
@@ -320,7 +329,7 @@ class MatrixSolveOpGpu : public AsyncOpKernel {
       int host_info = 0;
       OP_REQUIRES_OK_ASYNC(
           context,
-          solver->GetrsBatched(op_t, n, nrhs, input_copy_ptrs_base, n,
+          solver->GetrsBatched(opbatch_t, n, nrhs, input_copy_ptrs_base, n,
                                pivots_mat.data(), transposed_rhs_ptrs_base, n,
                                &host_info, batch_size),
           done);
@@ -358,9 +367,9 @@ class MatrixSolveOpGpu : public AsyncOpKernel {
     // kernels run. TODO(rmlarsen): Use move capture once C++14 becomes
     // available.
     auto info_checker = [context, done, dev_info](
-                            const Status& status,
+                            const absl::Status& status,
                             const std::vector<HostLapackInfo>& host_infos) {
-      if (!status.ok() && errors::IsInvalidArgument(status) &&
+      if (!status.ok() && absl::IsInvalidArgument(status) &&
           !host_infos.empty()) {
         for (int i = 0; i < host_infos[0].size(); ++i) {
           // Match the CPU error message for singular matrices. Otherwise

@@ -111,7 +111,7 @@ class InitializeTableFromTextFileOp : public OpKernel {
     if (ctx->HasAttr("offset")) {
       OP_REQUIRES_OK(ctx, ctx->GetAttr("offset", &offset_));
     }
-    string delimiter;
+    std::string delimiter;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("delimiter", &delimiter));
     OP_REQUIRES(ctx, delimiter.size() == 1,
                 errors::InvalidArgument("delimiter should be only 1 char"));
@@ -137,7 +137,8 @@ class InitializeTableFromTextFileOp : public OpKernel {
         errors::InvalidArgument("filename should be a single string, but got ",
                                 vocab_filename_tensor.shape().DebugString()));
 
-    const string& vocab_filename = vocab_filename_tensor.scalar<tstring>()();
+    const std::string& vocab_filename =
+        vocab_filename_tensor.scalar<tstring>()();
     OP_REQUIRES(ctx, !vocab_filename.empty(),
                 errors::InvalidArgument("filename cannot be empty."));
 
@@ -159,7 +160,7 @@ class InitializeTableFromTextFileOp : public OpKernel {
  private:
   std::unique_ptr<InitializerSerializer> MakeInitializerSerializer(
       Tensor vocab_filename) {
-    return absl::make_unique<InitializerSerializer>(
+    return std::make_unique<InitializerSerializer>(
         [vocab_filename, vocab_size = vocab_size_, delimiter = delimiter_,
          key_index = key_index_, value_index = value_index_,
          offset = offset_](GraphDefBuilder* builder, Node* table, Node** out) {
@@ -178,7 +179,7 @@ class InitializeTableFromTextFileOp : public OpKernel {
                   .WithAttr("delimiter", delimiter_string));
           *out = ops::UnaryOp("Identity", table,
                               builder->opts().WithControlInput(import_table));
-          return Status::OK();
+          return absl::OkStatus();
         });
   }
 
@@ -189,7 +190,8 @@ class InitializeTableFromTextFileOp : public OpKernel {
   int64_t value_index_;
   int64_t offset_ = 0;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(InitializeTableFromTextFileOp);
+  InitializeTableFromTextFileOp(const InitializeTableFromTextFileOp&) = delete;
+  void operator=(const InitializeTableFromTextFileOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("InitializeTableFromTextFile").Device(DEVICE_CPU),

@@ -20,11 +20,14 @@ limitations under the License.
 #define GEMMLOWP_ALLOW_SLOW_SCALAR_FALLBACK
 #include "public/gemmlowp.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/kernels/meta_support.h"
 #include "tensorflow/core/kernels/quantization_utils.h"
 #include "tensorflow/core/kernels/reference_gemm.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/platform/errors.h"
 
 namespace tensorflow {
 
@@ -35,9 +38,9 @@ template <bool TransposeA, bool TransposeB, bool TransposeC>
 void GemmlowpMultiply(OpKernelContext* op_context, const quint8* a_data,
                       const quint8* b_data, qint32* c_data, int m, int n, int k,
                       int offset_a, int offset_b, int lda, int ldb, int ldc) {
-  const uint8* a_data_as_uint8 = &(a_data->value);
-  const uint8* b_data_as_uint8 = &(b_data->value);
-  int32* c_data_as_int32 = &(c_data->value);
+  const uint8_t* a_data_as_uint8 = &(a_data->value);
+  const uint8_t* b_data_as_uint8 = &(b_data->value);
+  int32_t* c_data_as_int32 = &(c_data->value);
   static const gemmlowp::MapOrder ResultOrder =
       !TransposeC ? gemmlowp::MapOrder::RowMajor : gemmlowp::MapOrder::ColMajor;
   static const gemmlowp::MapOrder LhsOrder =
@@ -75,9 +78,21 @@ class QuantizedMatMulOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& a = context->input(0);
     const Tensor& b = context->input(1);
+    OP_REQUIRES(context, TensorShapeUtils::IsScalar(context->input(2).shape()),
+                errors::InvalidArgument("min_a must be a scalar, but got shape",
+                                        context->input(2).shape()));
     const float min_a = context->input(2).flat<float>()(0);
+    OP_REQUIRES(context, context->input(3).NumElements() == 1,
+                errors::InvalidArgument("max_a must be a scalar, but got shape",
+                                        context->input(3).shape()));
     const float max_a = context->input(3).flat<float>()(0);
+    OP_REQUIRES(context, context->input(4).NumElements() == 1,
+                errors::InvalidArgument("min_b must be a scalar, but got shape",
+                                        context->input(4).shape()));
     const float min_b = context->input(4).flat<float>()(0);
+    OP_REQUIRES(context, context->input(5).NumElements() == 1,
+                errors::InvalidArgument("max_b must be a scalar, but got shape",
+                                        context->input(5).shape()));
     const float max_b = context->input(5).flat<float>()(0);
 
     // Make sure that we have valid quantization ranges for the input buffers.

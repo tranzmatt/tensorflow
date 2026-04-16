@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <cmath>
 #include <type_traits>
+#include <vector>
 
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/kernel_shape_util.h"
@@ -32,6 +33,7 @@ limitations under the License.
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/conv_ops.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/padding.h"
@@ -39,14 +41,9 @@ limitations under the License.
 #include "tensorflow/core/util/use_cudnn.h"
 #include "tensorflow/core/util/work_sharder.h"
 
-#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-
 #if GOOGLE_CUDA
 #include "third_party/gpus/cudnn/cudnn.h"
 #endif
-
-#include "tensorflow/core/platform/stream_executor.h"
-#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 namespace tensorflow {
 
@@ -59,6 +56,18 @@ namespace tensorflow {
 
 typedef Eigen::ThreadPoolDevice CPUDevice;
 typedef Eigen::GpuDevice GPUDevice;
+
+bool UseCudnnWith16BitFloat(OpKernelContext* ctx, DataType dtype) {
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  if (dtype == DT_HALF) {
+    return true;
+  } else if (dtype == DT_BFLOAT16) {
+    auto* stream = ctx->op_device_context()->stream();
+    return IsBF16SupportedInOps(stream);
+  }
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  return false;
+}
 
 // Computes the vectorized product of 'input_buffer' and 'filter' and stores
 // result in 'output' at location specified by 'out_r' and 'out_c'.
@@ -248,6 +257,7 @@ struct LaunchDepthwiseConvOp<CPUDevice, T> {
 };
 
 // Extern template instantiated in conv_ops.cc.
+extern template struct LaunchConv2DOp<CPUDevice, bfloat16>;
 extern template struct LaunchConv2DOp<CPUDevice, Eigen::half>;
 extern template struct LaunchConv2DOp<CPUDevice, float>;
 extern template struct LaunchConv2DOp<CPUDevice, double>;
@@ -255,16 +265,18 @@ extern template struct LaunchConv2DOp<CPUDevice, double>;
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 // Extern template instantiated in conv_ops.cc.
+extern template struct LaunchConv2DOp<GPUDevice, Eigen::bfloat16>;
 extern template struct LaunchConv2DOp<GPUDevice, Eigen::half>;
 extern template struct LaunchConv2DOp<GPUDevice, float>;
 extern template struct LaunchConv2DOp<GPUDevice, double>;
 
 // Extern template instantiated in depthwise_conv_op_gpu.cc.
+extern template struct LaunchDepthwiseConvOp<GPUDevice, Eigen::bfloat16>;
 extern template struct LaunchDepthwiseConvOp<GPUDevice, Eigen::half>;
 extern template struct LaunchDepthwiseConvOp<GPUDevice, float>;
 extern template struct LaunchDepthwiseConvOp<GPUDevice, double>;
 
-#endif
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 template <typename Device, typename T>
 class DepthwiseConv2dNativeOp : public BinaryOp<T> {
@@ -272,7 +284,7 @@ class DepthwiseConv2dNativeOp : public BinaryOp<T> {
   explicit DepthwiseConv2dNativeOp(OpKernelConstruction* context)
       : BinaryOp<T>(context) {
     OP_REQUIRES_OK(context, context->GetAttr("strides", &strides_));
-    string data_format;
+    std::string data_format;
     OP_REQUIRES_OK(context, context->GetAttr("data_format", &data_format));
     OP_REQUIRES(context, FormatFromString(data_format, &data_format_),
                 errors::InvalidArgument("Invalid data format"));
@@ -299,6 +311,23 @@ class DepthwiseConv2dNativeOp : public BinaryOp<T> {
     OP_REQUIRES_OK(context, CheckValidPadding(padding_, explicit_paddings_,
                                               /*num_dims=*/4, data_format_));
 
+    // CPU/GPU kernel currently ignores dilations, so all must be 1.
+    std::vector<int32_t> dilations;
+    OP_REQUIRES_OK(context, context->GetAttr("dilations", &dilations));
+    bool unit_dilations = true;
+    for (int32_t dilation : dilations) {
+      if (dilation != 1) {
+        unit_dilations = false;
+      }
+    }
+    OP_REQUIRES(context, unit_dilations,
+                errors::Unimplemented(
+                    "Current kernel implementation does not support "
+                    "dilations, received [",
+                    Eigen::Map<Eigen::Matrix<int32_t, 1, Eigen::Dynamic>>(
+                        dilations.data(), dilations.size()),
+                    "]"));
+
     cudnn_use_autotune_ = CudnnUseAutotune();
     dtype_ = DataTypeToEnum<T>::value;
 #if CUDNN_VERSION >= 8000
@@ -309,7 +338,7 @@ class DepthwiseConv2dNativeOp : public BinaryOp<T> {
     // good performance. (https://docs.nvidia.com/deeplearning/sdk/cudnn-
     // release-notes/rel_8.html#rel_8)
     use_cudnn_grouped_conv_ =
-        dtype_ == DT_HALF &&
+        (dtype_ == DT_HALF || dtype_ == DT_BFLOAT16) &&
         (data_format_ == FORMAT_NCHW ||
          (data_format_ == FORMAT_NHWC && stride_ == stride_w &&
           (stride_ == 1 || stride_ == 2)));
@@ -356,17 +385,17 @@ class DepthwiseConv2dNativeOp : public BinaryOp<T> {
     const int64_t input_rows_raw = GetTensorDim(input, data_format_, 'H');
     OP_REQUIRES(
         context,
-        FastBoundsCheck(input_rows_raw, std::numeric_limits<int32>::max()),
+        FastBoundsCheck(input_rows_raw, std::numeric_limits<int32_t>::max()),
         errors::InvalidArgument("Input rows too large"));
-    const int32_t input_rows = static_cast<int32>(input_rows_raw);
+    const int32_t input_rows = static_cast<int32_t>(input_rows_raw);
     const int32_t filter_rows = filter.dim_size(0);
 
     const int64_t input_cols_raw = GetTensorDim(input, data_format_, 'W');
     OP_REQUIRES(
         context,
-        FastBoundsCheck(input_cols_raw, std::numeric_limits<int32>::max()),
+        FastBoundsCheck(input_cols_raw, std::numeric_limits<int32_t>::max()),
         errors::InvalidArgument("Input cols too large"));
-    const int32_t input_cols = static_cast<int32>(input_cols_raw);
+    const int32_t input_cols = static_cast<int32_t>(input_cols_raw);
     const int32_t filter_cols = filter.dim_size(1);
 
     // The first dimension for input is batch.
@@ -380,19 +409,23 @@ class DepthwiseConv2dNativeOp : public BinaryOp<T> {
       GetExplicitPaddingForDim(explicit_paddings_, data_format_, 'W', &pad_left,
                                &pad_right);
     }
-    OP_REQUIRES_OK(context, GetWindowedOutputSizeVerbose(
-                                input_rows, filter_rows, stride_, padding_,
-                                &out_rows, &pad_top, &pad_bottom));
-    OP_REQUIRES_OK(context, GetWindowedOutputSizeVerbose(
-                                input_cols, filter_cols, stride_, padding_,
-                                &out_cols, &pad_left, &pad_right));
-    TensorShape out_shape =
-        ShapeFromFormat(data_format_, batch, out_rows, out_cols, out_depth);
+    OP_REQUIRES_OK(context,
+                   GetWindowedOutputSizeVerbose(
+                       input_rows, filter_rows, /*dilation_rate=*/1, stride_,
+                       padding_, &out_rows, &pad_top, &pad_bottom));
+    OP_REQUIRES_OK(context,
+                   GetWindowedOutputSizeVerbose(
+                       input_cols, filter_cols, /*dilation_rate=*/1, stride_,
+                       padding_, &out_cols, &pad_left, &pad_right));
+    TensorShape out_shape;
+    OP_REQUIRES_OK(context,
+                   ShapeFromFormatWithStatus(data_format_, batch, out_rows,
+                                             out_cols, out_depth, &out_shape));
     OP_REQUIRES(
         context,
         (!std::is_same<Device, GPUDevice>::value ||
          FastBoundsCheck(out_shape.num_elements(),
-                         std::numeric_limits<int32>::max())),
+                         std::numeric_limits<int32_t>::max())),
         errors::InvalidArgument("Output elements too large for GPU kernel"));
 
     Tensor* output = nullptr;
@@ -406,13 +439,12 @@ class DepthwiseConv2dNativeOp : public BinaryOp<T> {
     // TODO(csigg): Have autotune decide if native is faster than cuDNN.
     // If in_depth==1, this operation is just a standard convolution.
     // Depthwise convolution is a special case of cuDNN's grouped convolution.
-    bool use_cudnn = std::is_same<Device, GPUDevice>::value &&
-                     (in_depth == 1 ||
-                      (use_cudnn_grouped_conv_ &&
-                       IsCudnnSupportedFilterSize(/*filter_rows=*/filter_rows,
-                                                  /*filter_cols=*/filter_cols,
-                                                  /*in_depth=*/in_depth,
-                                                  /*out_depth=*/out_depth)));
+    bool use_cudnn =
+        std::is_same<Device, GPUDevice>::value &&
+        (in_depth == 1 ||
+         (use_cudnn_grouped_conv_ && UseCudnnWith16BitFloat(context, dtype_) &&
+          ShouldCudnnGroupedConvolutionBeUsed(filter_rows, filter_cols,
+                                              in_depth, out_depth)));
 
     VLOG(2) << "DepthwiseConv2dNative: "
             << " Input: [" << batch << ", " << input_rows << ", " << input_cols
@@ -475,7 +507,7 @@ class DepthwiseConv2dNativeOp : public BinaryOp<T> {
   bool use_cudnn_grouped_conv_;
 
  private:
-  std::vector<int32> strides_;
+  std::vector<int32_t> strides_;
   Padding padding_;
   std::vector<int64_t> explicit_paddings_;
   TensorFormat data_format_;
@@ -487,7 +519,8 @@ class DepthwiseConv2dNativeOp : public BinaryOp<T> {
   bool cudnn_use_autotune_;
   DataType dtype_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(DepthwiseConv2dNativeOp);
+  DepthwiseConv2dNativeOp(const DepthwiseConv2dNativeOp&) = delete;
+  void operator=(const DepthwiseConv2dNativeOp&) = delete;
 };
 
 #define REGISTER_CPU_KERNEL(T)                                                 \
@@ -495,6 +528,7 @@ class DepthwiseConv2dNativeOp : public BinaryOp<T> {
       Name("DepthwiseConv2dNative").Device(DEVICE_CPU).TypeConstraint<T>("T"), \
       DepthwiseConv2dNativeOp<CPUDevice, T>)
 
+TF_CALL_bfloat16(REGISTER_CPU_KERNEL);
 TF_CALL_half(REGISTER_CPU_KERNEL);
 TF_CALL_float(REGISTER_CPU_KERNEL);
 #if !defined(PLATFORM_WINDOWS) || !defined(_DEBUG)
@@ -508,6 +542,7 @@ TF_CALL_double(REGISTER_CPU_KERNEL);
       Name("DepthwiseConv2dNative").Device(DEVICE_GPU).TypeConstraint<T>("T"), \
       DepthwiseConv2dNativeOp<GPUDevice, T>)
 
+TF_CALL_bfloat16(REGISTER_GPU_KERNEL);
 TF_CALL_half(REGISTER_GPU_KERNEL);
 TF_CALL_float(REGISTER_GPU_KERNEL);
 TF_CALL_double(REGISTER_GPU_KERNEL);
@@ -530,6 +565,7 @@ class DepthwiseConv2dGroupedConvOp
                               .Label("cudnn_grouped_convolution"), \
                           DepthwiseConv2dGroupedConvOp<T>)
 
+TF_CALL_bfloat16(REGISTER_GROUPED_CONV_KERNEL);
 TF_CALL_half(REGISTER_GROUPED_CONV_KERNEL);
 TF_CALL_float(REGISTER_GROUPED_CONV_KERNEL);
 TF_CALL_double(REGISTER_GROUPED_CONV_KERNEL);

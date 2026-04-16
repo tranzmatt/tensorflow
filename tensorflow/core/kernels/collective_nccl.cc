@@ -18,15 +18,15 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/collective_util.h"
 #include "tensorflow/core/nccl/nccl_manager.h"
-#include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 
 namespace tensorflow {
 
-NcclBase::NcclBase(CollectiveType type, const string& name)
+NcclBase::NcclBase(CollectiveType type, const std::string& name)
     : type_(type), name_(name), col_ctx_(nullptr), col_params_(nullptr) {}
 
-Status NcclBase::InitializeCollectiveParams(CollectiveParams* col_params) {
+absl::Status NcclBase::InitializeCollectiveParams(
+    CollectiveParams* col_params) {
   if (type_ != col_params->instance.type) {
     return errors::Internal("Expected initialized type ", type_,
                             " to match type in CollectiveParams ",
@@ -44,6 +44,12 @@ Status NcclBase::InitializeCollectiveParams(CollectiveParams* col_params) {
     case GATHER_COLLECTIVE:
       expected_name = "NcclGather";
       break;
+    case REDUCE_SCATTER_COLLECTIVE:
+      expected_name = "NcclReduceScatter";
+      break;
+    case ALL_TO_ALL_COLLECTIVE:
+      expected_name = "NcclAllToAll";
+      break;
     default:
       return errors::Internal("Unexpected CollectiveType ", type_);
   }
@@ -55,10 +61,10 @@ Status NcclBase::InitializeCollectiveParams(CollectiveParams* col_params) {
                             ", expected name ", expected_name);
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status NcclBase::InitializeCollectiveContext(
+absl::Status NcclBase::InitializeCollectiveContext(
     std::shared_ptr<CollectiveContext> col_ctx) {
   col_ctx_ = col_ctx;
   col_params_ = col_ctx->col_params.get();

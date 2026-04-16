@@ -15,6 +15,7 @@ limitations under the License.
 
 // See docs in ../ops/image_ops.cc.
 
+#include <cstdint>
 #define USE_EIGEN_TENSOR
 #define EIGEN_USE_THREADS
 
@@ -40,8 +41,8 @@ typedef Eigen::ThreadPoolDevice CPUDevice;
 typedef Eigen::GpuDevice GPUDevice;
 
 static inline void ParseAttributeVec4(OpKernelConstruction* context,
-                                      const string& attr_name,
-                                      std::vector<int32>* attr) {
+                                      const std::string& attr_name,
+                                      std::vector<int32_t>* attr) {
   OP_REQUIRES_OK(context, context->GetAttr(attr_name, attr));
   OP_REQUIRES(
       context, (*attr)[0] == 1 && (*attr)[3] == 1,
@@ -88,12 +89,12 @@ class ExtractImagePatchesOp : public UnaryOp<T> {
 
     int64_t out_rows = 0, out_cols = 0;
     int64_t pad_rows = 0, pad_cols = 0;
-    OP_REQUIRES_OK(context,
-                   GetWindowedOutputSize(in_rows, ksize_rows_eff, stride_rows,
-                                         padding_, &out_rows, &pad_rows));
-    OP_REQUIRES_OK(context,
-                   GetWindowedOutputSize(in_cols, ksize_cols_eff, stride_cols,
-                                         padding_, &out_cols, &pad_cols));
+    OP_REQUIRES_OK(context, GetWindowedOutputSize(
+                                in_rows, ksize_rows_eff, /*dilation_rate=*/1,
+                                stride_rows, padding_, &out_rows, &pad_rows));
+    OP_REQUIRES_OK(context, GetWindowedOutputSize(
+                                in_cols, ksize_cols_eff, /*dilation_rate=*/1,
+                                stride_cols, padding_, &out_cols, &pad_cols));
 
     const std::vector<int64_t> out_sizes = {batch, out_rows, out_cols,
                                             ksize_rows * ksize_cols * depth};
@@ -114,13 +115,14 @@ class ExtractImagePatchesOp : public UnaryOp<T> {
   }
 
  private:
-  std::vector<int32> ksizes_;
-  std::vector<int32> strides_;
-  std::vector<int32> rates_;
+  std::vector<int32_t> ksizes_;
+  std::vector<int32_t> strides_;
+  std::vector<int32_t> rates_;
 
   Padding padding_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(ExtractImagePatchesOp);
+  ExtractImagePatchesOp(const ExtractImagePatchesOp&) = delete;
+  void operator=(const ExtractImagePatchesOp&) = delete;
 };
 
 // Registration of the CPU implementations.

@@ -14,10 +14,16 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/util/example_proto_fast_parsing.h"
 
+#include <algorithm>
+#include <functional>
+#include <optional>
+#include <utility>
 #include <vector>
 
 #include "absl/base/casts.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/strings/substitute.h"
 #include "tensorflow/core/example/example.pb.h"
 #include "tensorflow/core/example/feature.pb.h"
 #include "tensorflow/core/framework/allocator.h"
@@ -25,11 +31,11 @@ limitations under the License.
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/types.pb.h"
-#include "tensorflow/core/lib/core/blocking_counter.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/lib/monitoring/counter.h"
+#include "tensorflow/core/platform/blocking_counter.h"
 #include "tensorflow/core/platform/byte_order.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/protobuf.h"
@@ -101,33 +107,33 @@ auto EnableAliasing(A* a) -> decltype(a->EnableAliasing(true), void()) {
 template <typename A>
 void EnableAliasing(A&& a) {}
 
-uint8 PeekTag(protobuf::io::CodedInputStream* stream) {
+uint8_t PeekTag(protobuf::io::CodedInputStream* stream) {
   DCHECK(stream != nullptr);
   const void* ptr;
   int size;
   if (!stream->GetDirectBufferPointer(&ptr, &size)) return 0;
-  return *static_cast<const uint8*>(ptr);
+  return *static_cast<const uint8_t*>(ptr);
 }
 
-constexpr uint8 kVarintTag(uint32 tag) { return (tag << 3) | 0; }
-constexpr uint8 kDelimitedTag(uint32 tag) { return (tag << 3) | 2; }
-constexpr uint8 kFixed32Tag(uint32 tag) { return (tag << 3) | 5; }
+constexpr uint8_t kVarintTag(uint32_t tag) { return (tag << 3) | 0; }
+constexpr uint8_t kDelimitedTag(uint32_t tag) { return (tag << 3) | 2; }
+constexpr uint8_t kFixed32Tag(uint32_t tag) { return (tag << 3) | 5; }
 
 namespace parsed {
 
 // ParseDataType has to be called first, then appropriate ParseZzzzList.
 class Feature {
  public:
-  Feature() {}
-  explicit Feature(StringPiece serialized) : serialized_(serialized) {}
+  Feature() = default;
+  explicit Feature(absl::string_view serialized) : serialized_(serialized) {}
 
-  Status ParseDataType(DataType* dtype) {
+  absl::Status ParseDataType(DataType* dtype) {
     DCHECK(dtype != nullptr);
     if (serialized_.empty()) {
       *dtype = DT_INVALID;
-      return Status::OK();
+      return absl::OkStatus();
     }
-    uint8 oneof_tag = static_cast<uint8>(*serialized_.data());
+    uint8_t oneof_tag = static_cast<uint8_t>(*serialized_.data());
     serialized_.remove_prefix(1);
     switch (oneof_tag) {
       case kDelimitedTag(1):
@@ -144,20 +150,21 @@ class Feature {
         *dtype = DT_INVALID;
         return errors::InvalidArgument("Unsupported datatype.");
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   bool GetNumElementsInBytesList(int* num_elements) {
     protobuf::io::CodedInputStream stream(
-        reinterpret_cast<const uint8*>(serialized_.data()), serialized_.size());
+        reinterpret_cast<const uint8_t*>(serialized_.data()),
+        serialized_.size());
     EnableAliasing(&stream);
-    uint32 length = 0;
+    uint32_t length = 0;
     if (!stream.ReadVarint32(&length)) return false;
     auto limit = stream.PushLimit(length);
     *num_elements = 0;
     while (!stream.ExpectAtEnd()) {
       if (!stream.ExpectTag(kDelimitedTag(1))) return false;
-      uint32 bytes_length = 0;
+      uint32_t bytes_length = 0;
       if (!stream.ReadVarint32(&bytes_length)) return false;
       if (!stream.Skip(bytes_length)) return false;
       ++*num_elements;
@@ -182,18 +189,19 @@ class Feature {
     DCHECK(bytes_list != nullptr);
 
     protobuf::io::CodedInputStream stream(
-        reinterpret_cast<const uint8*>(serialized_.data()), serialized_.size());
+        reinterpret_cast<const uint8_t*>(serialized_.data()),
+        serialized_.size());
 
     EnableAliasing(&stream);
 
-    uint32 length;
+    uint32_t length;
     if (!stream.ReadVarint32(&length)) return false;
     auto limit = stream.PushLimit(length);
 
     while (!stream.ExpectAtEnd()) {
       if (!stream.ExpectTag(kDelimitedTag(1))) return false;
       // parse string
-      uint32 bytes_length;
+      uint32_t bytes_length;
       if (!stream.ReadVarint32(&bytes_length)) return false;
       tstring* bytes = construct_at_end(bytes_list);
       if (bytes == nullptr) return false;
@@ -208,14 +216,15 @@ class Feature {
   bool ParseFloatList(Result* float_list) {
     DCHECK(float_list != nullptr);
     protobuf::io::CodedInputStream stream(
-        reinterpret_cast<const uint8*>(serialized_.data()), serialized_.size());
+        reinterpret_cast<const uint8_t*>(serialized_.data()),
+        serialized_.size());
     EnableAliasing(&stream);
-    uint32 length;
+    uint32_t length;
     if (!stream.ReadVarint32(&length)) return false;
     auto limit = stream.PushLimit(length);
 
     if (!stream.ExpectAtEnd()) {
-      uint8 peek_tag = PeekTag(&stream);
+      uint8_t peek_tag = PeekTag(&stream);
       if (peek_tag != kDelimitedTag(1) && peek_tag != kFixed32Tag(1)) {
         return false;
       }
@@ -223,7 +232,7 @@ class Feature {
       constexpr int32_t kNumFloatBytes = 4;
       if (peek_tag == kDelimitedTag(1)) {                       // packed
         if (!stream.ExpectTag(kDelimitedTag(1))) return false;  // packed tag
-        uint32 packed_length;
+        uint32_t packed_length;
         if (!stream.ReadVarint32(&packed_length)) return false;
         auto packed_limit = stream.PushLimit(packed_length);
 
@@ -239,16 +248,16 @@ class Feature {
             sizeof(typename Result::value_type) == kNumFloatBytes) {
           // Calculate the length of the buffer available what can be less than
           // what we requested in resize in case of a LimitedArraySlice.
-          const uint32 bytes_to_copy =
-              std::min(static_cast<uint32>((float_list->size() - initial_size) *
-                                           kNumFloatBytes),
-                       packed_length);
+          const uint32_t bytes_to_copy = std::min(
+              static_cast<uint32_t>((float_list->size() - initial_size) *
+                                    kNumFloatBytes),
+              packed_length);
           if (!stream.ReadRaw(float_list->data() + initial_size, bytes_to_copy))
             return false;
         } else {
           int64_t index = initial_size;
           while (!stream.ExpectAtEnd()) {
-            uint32 buffer32;
+            uint32_t buffer32;
             if (!stream.ReadLittleEndian32(&buffer32)) return false;
             if (index < float_list->size()) {
               float_list->data()[index] = absl::bit_cast<float>(buffer32);
@@ -268,10 +277,12 @@ class Feature {
         int64_t index = initial_size;
         while (!stream.ExpectAtEnd()) {
           if (!stream.ExpectTag(kFixed32Tag(1))) return false;
-          uint32 buffer32;
+          uint32_t buffer32;
           if (!stream.ReadLittleEndian32(&buffer32)) return false;
-          float_list->data()[index] = absl::bit_cast<float>(buffer32);
-          ++index;
+          if (index < static_cast<int64_t>(float_list->size())) {
+            float_list->data()[index] = absl::bit_cast<float>(buffer32);
+            ++index;
+          }
         }
       }
     }
@@ -284,20 +295,21 @@ class Feature {
   bool ParseInt64List(Result* int64_list) {
     DCHECK(int64_list != nullptr);
     protobuf::io::CodedInputStream stream(
-        reinterpret_cast<const uint8*>(serialized_.data()), serialized_.size());
+        reinterpret_cast<const uint8_t*>(serialized_.data()),
+        serialized_.size());
     EnableAliasing(&stream);
-    uint32 length;
+    uint32_t length;
     if (!stream.ReadVarint32(&length)) return false;
     auto limit = stream.PushLimit(length);
 
     if (!stream.ExpectAtEnd()) {
-      uint8 peek_tag = PeekTag(&stream);
+      uint8_t peek_tag = PeekTag(&stream);
       if (peek_tag != kDelimitedTag(1) && peek_tag != kVarintTag(1)) {
         return false;
       }
       if (peek_tag == kDelimitedTag(1)) {                       // packed
         if (!stream.ExpectTag(kDelimitedTag(1))) return false;  // packed tag
-        uint32 packed_length;
+        uint32_t packed_length;
         if (!stream.ReadVarint32(&packed_length)) return false;
         auto packed_limit = stream.PushLimit(packed_length);
 
@@ -321,20 +333,20 @@ class Feature {
     return true;
   }
 
-  StringPiece GetSerialized() const { return serialized_; }
+  absl::string_view GetSerialized() const { return serialized_; }
 
  private:
   // TODO(lew): Pair of uint8* would be more natural.
-  StringPiece serialized_;
+  absl::string_view serialized_;
 };
 
-using FeatureMapEntry = std::pair<StringPiece, Feature>;
+using FeatureMapEntry = std::pair<absl::string_view, Feature>;
 using Example = std::vector<FeatureMapEntry>;
 
 }  // namespace parsed
 
 inline bool SkipExtraneousTag(protobuf::io::CodedInputStream* stream) {
-  uint32 data;
+  uint32_t data;
   protobuf_uint64 dummy;
   switch (stream->ReadTag() & 0x7) {
     case 0:  // varint
@@ -358,13 +370,14 @@ inline bool SkipExtraneousTag(protobuf::io::CodedInputStream* stream) {
   return false;  // unrecognized tag type
 }
 
-bool ParseString(protobuf::io::CodedInputStream* stream, StringPiece* result) {
+bool ParseString(protobuf::io::CodedInputStream* stream,
+                 absl::string_view* result) {
   DCHECK(stream != nullptr);
   DCHECK(result != nullptr);
-  uint32 length;
+  uint32_t length;
   if (!stream->ReadVarint32(&length)) return false;
   if (length == 0) {
-    *result = StringPiece(nullptr, 0);
+    *result = absl::string_view(nullptr, 0);
     return true;
   }
   const void* stream_alias;
@@ -372,8 +385,8 @@ bool ParseString(protobuf::io::CodedInputStream* stream, StringPiece* result) {
   if (!stream->GetDirectBufferPointer(&stream_alias, &stream_size)) {
     return false;
   }
-  if (static_cast<uint32>(stream_size) < length) return false;
-  *result = StringPiece(static_cast<const char*>(stream_alias), length);
+  if (static_cast<uint32_t>(stream_size) < length) return false;
+  *result = absl::string_view(static_cast<const char*>(stream_alias), length);
   stream->Skip(length);
   return true;
 }
@@ -382,15 +395,30 @@ bool ParseFeatureMapEntry(protobuf::io::CodedInputStream* stream,
                           parsed::FeatureMapEntry* feature_map_entry) {
   DCHECK(stream != nullptr);
   DCHECK(feature_map_entry != nullptr);
-  uint32 length;
+  uint32_t length;
   if (!stream->ReadVarint32(&length)) return false;
   auto limit = stream->PushLimit(length);
-  if (!stream->ExpectTag(kDelimitedTag(1))) return false;
-  if (!ParseString(stream, &feature_map_entry->first)) return false;
-  if (!stream->ExpectTag(kDelimitedTag(2))) return false;
-  StringPiece feature_string_piece;
-  if (!ParseString(stream, &feature_string_piece)) return false;
-  feature_map_entry->second = parsed::Feature(feature_string_piece);
+
+  // Protobufs allow an arbitrary order for the key and value fields.
+  for (int n = 0; n < 2; ++n) {
+    const uint32_t tag = stream->ReadTag();
+    switch (tag) {
+      case kDelimitedTag(1):
+        if (!ParseString(stream, &feature_map_entry->first)) return false;
+        break;
+
+      case kDelimitedTag(2): {
+        absl::string_view feature_string_piece;
+        if (!ParseString(stream, &feature_string_piece)) return false;
+        feature_map_entry->second = parsed::Feature(feature_string_piece);
+        break;
+      }
+
+      default:
+        return false;
+    }
+  }
+
   if (!stream->ExpectAtEnd()) return false;
   stream->PopLimit(limit);
   return true;
@@ -400,7 +428,7 @@ bool ParseFeatures(protobuf::io::CodedInputStream* stream,
                    parsed::Example* example) {
   DCHECK(stream != nullptr);
   DCHECK(example != nullptr);
-  uint32 length;
+  uint32_t length;
   if (!stream->ReadVarint32(&length)) return false;
   auto limit = stream->PushLimit(length);
   while (!stream->ExpectAtEnd()) {
@@ -430,17 +458,17 @@ bool ParseExample(protobuf::io::CodedInputStream* stream,
   return true;
 }
 
-bool ParseExample(StringPiece serialized, parsed::Example* example) {
+bool ParseExample(absl::string_view serialized, parsed::Example* example) {
   DCHECK(example != nullptr);
   protobuf::io::CodedInputStream stream(
-      reinterpret_cast<const uint8*>(serialized.data()), serialized.size());
+      reinterpret_cast<const uint8_t*>(serialized.data()), serialized.size());
   EnableAliasing(&stream);
   return ParseExample(&stream, example);
 }
 
 }  // namespace
 
-bool TestFastParse(const string& serialized, Example* example) {
+bool TestFastParse(const std::string& serialized, Example* example) {
   DCHECK(example != nullptr);
   parsed::Example parsed_example;
   if (!ParseExample(serialized, &parsed_example)) return false;
@@ -451,7 +479,7 @@ bool TestFastParse(const string& serialized, Example* example) {
     // I.e. last entry in the map overwrites all the previous ones.
     parsed::FeatureMapEntry& name_and_feature =
         parsed_example[parsed_example_size - i - 1];
-    string name(name_and_feature.first);
+    std::string name(name_and_feature.first);
     if ((*features.mutable_feature()).count(name) > 0) continue;
 
     auto& value = (*features.mutable_feature())[name];
@@ -540,13 +568,13 @@ struct SparseBuffer {
 };
 
 struct SeededHasher {
-  uint64 operator()(StringPiece s) const {
+  uint64_t operator()(absl::string_view s) const {
     return Hash64(s.data(), s.size(), seed);
   }
-  uint64 seed{0xDECAFCAFFE};
+  uint64_t seed{0xDECAFCAFFE};
 };
 
-void LogDenseFeatureDataLoss(StringPiece feature_name) {
+void LogDenseFeatureDataLoss(absl::string_view feature_name) {
   LOG(WARNING) << "Data loss! Feature '" << feature_name
                << "' is present in multiple concatenated "
                   "tf.Examples. Ignoring all but last one.";
@@ -557,7 +585,7 @@ void LogDenseFeatureDataLoss(StringPiece feature_name) {
   duplicated_dense_feature->GetCell()->IncrementBy(1);
 }
 
-void LogSparseFeatureDataLoss(StringPiece feature_name) {
+void LogSparseFeatureDataLoss(absl::string_view feature_name) {
   LOG(WARNING) << "Data loss! Feature '" << feature_name
                << "' is present in multiple concatenated "
                   "tf.Examples. Ignoring all but last one.";
@@ -568,7 +596,7 @@ void LogSparseFeatureDataLoss(StringPiece feature_name) {
   duplicated_sparse_feature->GetCell()->IncrementBy(1);
 }
 
-Status FastParseSerializedExample(
+absl::Status FastParseSerializedExample(
     const tstring& serialized_example, const tstring& example_name,
     const size_t example_index, const Config& config,
     const PresizedCuckooMap<std::pair<size_t, Type>>& config_index,
@@ -605,11 +633,11 @@ Status FastParseSerializedExample(
     parsed::FeatureMapEntry& name_and_feature =
         parsed_example[parsed_example_size - i - 1];
 
-    const StringPiece feature_name = name_and_feature.first;
+    const absl::string_view feature_name = name_and_feature.first;
     parsed::Feature& feature = name_and_feature.second;
 
     std::pair<size_t, Type> d_and_type;
-    uint64 h = hasher(feature_name);
+    uint64_t h = hasher(feature_name);
     if (!config_index.Find(h, &d_and_type)) continue;
 
     size_t d = d_and_type.first;
@@ -626,7 +654,7 @@ Status FastParseSerializedExample(
       if (feature_name != config_feature_name) continue;
     }
 
-    auto example_error = [&](StringPiece suffix) {
+    auto example_error = [&](absl::string_view suffix) {
       return errors::InvalidArgument("Name: ", example_name,
                                      ", Key: ", feature_name,
                                      ", Index: ", example_index, ".  ", suffix);
@@ -651,7 +679,7 @@ Status FastParseSerializedExample(
       dense_feature_last_example[d] = example_index;
 
       if (example_dtype != config.dense[d].dtype) {
-        return example_error(strings::StrCat(
+        return example_error(absl::StrCat(
             "Data types don't match. Data type: ",
             DataTypeString(example_dtype),
             " but expected type: ", DataTypeString(config.dense[d].dtype)));
@@ -669,7 +697,7 @@ Status FastParseSerializedExample(
 
         const std::size_t offset = example_index * num_elements;
 
-        auto shape_error = [&](size_t size, StringPiece type_str) {
+        auto shape_error = [&](size_t size, absl::string_view type_str) {
           return example_error(strings::StrCat(
               "Number of ", type_str,
               " values != expected.  "
@@ -716,12 +744,12 @@ Status FastParseSerializedExample(
 
         if (example_dtype != DT_INVALID &&
             example_dtype != config.dense[d].dtype) {
-          return example_error(strings::StrCat(
+          return example_error(absl::StrCat(
               "Data types don't match. ",
               "Expected type: ", DataTypeString(config.dense[d].dtype)));
         }
 
-        auto shape_error = [&](size_t size, StringPiece type_str) {
+        auto shape_error = [&](size_t size, absl::string_view type_str) {
           return example_error(strings::StrCat(
               "Number of ", type_str,
               " values is not a multiple of stride length. Saw ", size,
@@ -926,15 +954,15 @@ Status FastParseSerializedExample(
     out.example_end_indices.push_back(prev_example_end_index);
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status CheckConfigDataType(DataType dtype) {
+absl::Status CheckConfigDataType(DataType dtype) {
   switch (dtype) {
     case DT_INT64:
     case DT_FLOAT:
     case DT_STRING:
-      return Status::OK();
+      return absl::OkStatus();
     default:
       return errors::InvalidArgument("Invalid config dtype: ",
                                      DataTypeString(dtype));
@@ -949,7 +977,7 @@ inline void ReportUnexpectedDataType(DataType dtype) {
       << "in variable that should have been checked by CheckConfigDataType().";
 }
 
-Status CheckConfigDataTypes(const Config& config) {
+absl::Status CheckConfigDataTypes(const Config& config) {
   // Check config so we can safely CHECK(false) in switches on config.*.dtype
   for (auto& c : config.sparse) {
     TF_RETURN_IF_ERROR(CheckConfigDataType(c.dtype));
@@ -964,7 +992,7 @@ Status CheckConfigDataTypes(const Config& config) {
                                      DataTypeString(c.splits_dtype));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <typename T>
@@ -1066,7 +1094,7 @@ class TensorVector {
  private:
   // Use absl::optional to avoid calling the default constructor of Tensor
   // unnecessarily.
-  absl::optional<Tensor> tensor_;
+  std::optional<Tensor> tensor_;
 
   // Cached pointer to the raw data inside the tensor.
   T* data_ = nullptr;
@@ -1112,10 +1140,10 @@ void CopySparseBufferToTensor(DataType dtype, size_t offset, SparseBuffer* src,
 
 }  // namespace
 
-Status FastParseExample(const Config& config,
-                        gtl::ArraySlice<tstring> serialized,
-                        gtl::ArraySlice<tstring> example_names,
-                        thread::ThreadPool* thread_pool, Result* result) {
+absl::Status FastParseExample(const Config& config,
+                              absl::Span<const tstring> serialized,
+                              absl::Span<const tstring> example_names,
+                              thread::ThreadPool* thread_pool, Result* result) {
   DCHECK(result != nullptr);
   // Check config so we can safely CHECK(false) in switches on config.*.dtype
   TF_RETURN_IF_ERROR(CheckConfigDataTypes(config));
@@ -1151,7 +1179,7 @@ Status FastParseExample(const Config& config,
     ok = true;
   }
   if (!ok) {
-    return errors::Internal(
+    return absl::InternalError(
         "Could not avoid collision. This should not happen.");
   }
 
@@ -1209,7 +1237,7 @@ Status FastParseExample(const Config& config,
   std::vector<std::vector<SparseBuffer>> sparse_buffers(num_minibatches);
   std::vector<std::vector<SparseBuffer>> varlen_dense_buffers(num_minibatches);
   std::vector<std::vector<SparseBuffer>> ragged_buffers(num_minibatches);
-  std::vector<Status> status_of_minibatch(num_minibatches);
+  std::vector<absl::Status> status_of_minibatch(num_minibatches);
   auto ProcessMiniBatch = [&](size_t minibatch) {
     sparse_buffers[minibatch].resize(config.sparse.size());
     varlen_dense_buffers[minibatch].resize(config.dense.size());
@@ -1233,7 +1261,7 @@ Status FastParseExample(const Config& config,
 
   ParallelFor(ProcessMiniBatch, num_minibatches, thread_pool);
 
-  for (Status& status : status_of_minibatch) {
+  for (absl::Status& status : status_of_minibatch) {
     TF_RETURN_IF_ERROR(status);
   }
 
@@ -1280,7 +1308,7 @@ Status FastParseExample(const Config& config,
       size_t delta = 0;
 
       if (indices->NumElements() > 0) {
-        int64* ix_p = &indices->matrix<int64_t>()(offset, 0);
+        int64_t* ix_p = &indices->matrix<int64_t>()(offset, 0);
         size_t example_index = first_example_of_minibatch(i);
         for (size_t example_end_index : buffer.example_end_indices) {
           size_t feature_index = 0;
@@ -1317,7 +1345,7 @@ Status FastParseExample(const Config& config,
     if (config.ragged[d].splits_dtype == DT_INT64) {
       row_splits->flat<int64_t>()(0) = 0;
     } else {
-      row_splits->flat<int32>()(0) = 0;
+      row_splits->flat<int32_t>()(0) = 0;
     }
 
     TensorShape values_shape;
@@ -1334,13 +1362,13 @@ Status FastParseExample(const Config& config,
       // Update row_splits.  row_splits are formed by concatenating the example
       // end_indices (adjusting each to start after the previous one ends).
       if (config.ragged[d].splits_dtype == DT_INT64) {
-        int64* row_splits_out = &row_splits->flat<int64_t>()(splits_offset);
+        int64_t* row_splits_out = &row_splits->flat<int64_t>()(splits_offset);
         int64_t start = *row_splits_out;
         for (size_t example_end_index : buffer.example_end_indices) {
           *++row_splits_out = start + example_end_index;
         }
       } else {
-        int32* row_splits_out = &row_splits->flat<int32>()(splits_offset);
+        int32_t* row_splits_out = &row_splits->flat<int32_t>()(splits_offset);
         int32_t start = *row_splits_out;
         for (size_t example_end_index : buffer.example_end_indices) {
           *++row_splits_out = start + example_end_index;
@@ -1423,11 +1451,12 @@ Status FastParseExample(const Config& config,
     MergeRaggedMinibatches(d);
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status FastParseSingleExample(const Config& config, StringPiece serialized,
-                              Result* result) {
+absl::Status FastParseSingleExample(const Config& config,
+                                    absl::string_view serialized,
+                                    Result* result) {
   DCHECK(result != nullptr);
   // Check config so we can safely CHECK(false) in switches on config.*.dtype
   TF_RETURN_IF_ERROR(CheckConfigDataTypes(config));
@@ -1466,7 +1495,7 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
     ok = true;
   }
   if (!ok) {
-    return errors::Internal(
+    return absl::InternalError(
         "Could not avoid collision. This should not happen.");
   }
 
@@ -1482,7 +1511,7 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
     if (!config.dense[d].variable_length) {
       TensorShape values_shape;
       if (!config.dense[d].shape.AsTensorShape(&values_shape)) {
-        return errors::Internal(
+        return absl::InternalError(
             "Fixed-length shape was not a statically defined shape.");
       }
       result->dense_values.emplace_back(config.dense[d].dtype, values_shape);
@@ -1534,11 +1563,11 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
     parsed::FeatureMapEntry& name_and_feature =
         parsed_example[parsed_example_size - i - 1];
 
-    const StringPiece feature_name = name_and_feature.first;
+    const absl::string_view feature_name = name_and_feature.first;
     parsed::Feature& feature = name_and_feature.second;
 
     std::pair<size_t, Type> d_and_type;
-    uint64 h = hasher(feature_name);
+    uint64_t h = hasher(feature_name);
     if (!config_index.Find(h, &d_and_type)) continue;
 
     size_t d = d_and_type.first;
@@ -1555,13 +1584,14 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
       if (feature_name != config_feature_name) continue;
     }
 
-    auto example_error = [feature_name](StringPiece suffix) {
+    auto example_error = [feature_name](absl::string_view suffix) {
       return errors::InvalidArgument("Key: ", feature_name, ".  ", suffix);
     };
 
-    auto parse_error = [feature_name] {
-      return errors::InvalidArgument("Key: ", feature_name,
-                                     ".  Can't parse serialized Example.");
+    auto parse_error = [feature_name](absl::string_view description) {
+      return errors::InvalidArgument(
+          "Key: ", feature_name,
+          ".  Can't parse serialized Example: ", description);
     };
 
     DataType example_dtype;
@@ -1578,7 +1608,7 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
       dense_feature_already_seen[d] = true;
 
       if (example_dtype != config.dense[d].dtype) {
-        return example_error(strings::StrCat(
+        return example_error(absl::StrCat(
             "Data types don't match. Data type: ",
             DataTypeString(example_dtype),
             " but expected type: ", DataTypeString(config.dense[d].dtype)));
@@ -1596,27 +1626,30 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
         case DT_INT64: {
           auto out_p = out->flat<int64_t>().data();
           LimitedArraySlice<int64_t> slice(out_p, num_elements);
-          if (!feature.ParseInt64List(&slice)) return parse_error();
+          if (!feature.ParseInt64List(&slice))
+            return parse_error("Parsing int64_list failed.");
           if (slice.EndDistance() != 0) {
-            return parse_error();
+            return parse_error("Some int64_list slice was not parsed.");
           }
           break;
         }
         case DT_FLOAT: {
           auto out_p = out->flat<float>().data();
           LimitedArraySlice<float> slice(out_p, num_elements);
-          if (!feature.ParseFloatList(&slice)) return parse_error();
+          if (!feature.ParseFloatList(&slice))
+            return parse_error("Parsing float_list failed.");
           if (slice.EndDistance() != 0) {
-            return parse_error();
+            return parse_error("Some float_list slice was not parsed.");
           }
           break;
         }
         case DT_STRING: {
           auto out_p = out->flat<tstring>().data();
           LimitedArraySlice<tstring> slice(out_p, num_elements);
-          if (!feature.ParseBytesList(&slice)) return parse_error();
+          if (!feature.ParseBytesList(&slice))
+            return parse_error("Parsing bytes_list failed.");
           if (slice.EndDistance() != 0) {
-            return parse_error();
+            return parse_error("Some bytes_list slice was not parsed.");
           }
           break;
         }
@@ -1642,7 +1675,7 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
         }
         dense_feature_already_seen[d] = true;
         if (example_dtype != config.dense[d].dtype) {
-          return example_error(strings::StrCat(
+          return example_error(absl::StrCat(
               "Data types don't match. Data type: ",
               DataTypeString(example_dtype),
               " but expected type: ", DataTypeString(config.dense[d].dtype)));
@@ -1674,22 +1707,25 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
         case DT_INT64: {
           // TODO(mrry): Use the fact that the `int64_list` is packed to read
           // out the length and pre-allocate the output tensor.
-          if (!feature.ParseInt64List(&int64_list)) return parse_error();
+          if (!feature.ParseInt64List(&int64_list))
+            return parse_error("Parsing int64_list failed.");
           num_elements = int64_list.size();
           break;
         }
         case DT_FLOAT: {
-          if (!feature.ParseFloatList(&float_list)) return parse_error();
+          if (!feature.ParseFloatList(&float_list))
+            return parse_error("Parsing float_list failed.");
           num_elements = float_list.size();
           break;
         }
         case DT_STRING: {
           int actual_num_elements = 0;
           if (!feature.GetNumElementsInBytesList(&actual_num_elements)) {
-            return parse_error();
+            return parse_error("Could not get num elements in bytes_list.");
           }
           bytes_list.reserve(actual_num_elements);
-          if (!feature.ParseBytesList(&bytes_list)) return parse_error();
+          if (!feature.ParseBytesList(&bytes_list))
+            return parse_error("Parsing bytes_list failed.");
           num_elements = bytes_list.size();
           break;
         }
@@ -1699,7 +1735,10 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
       }
 
       if (num_elements % num_elements_divisor != 0) {
-        return parse_error();
+        return absl::InvalidArgumentError(absl::Substitute(
+            "Error while parsing feature with key $0: number "
+            "of elements should be divisible by $1, found $2 instead",
+            feature_name, num_elements_divisor, num_elements));
       }
 
       if (stats) {
@@ -1752,7 +1791,9 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
         }
         case DT_FLOAT: {
           if (!out->CopyFrom(float_list.tensor(), out_shape)) {
-            return parse_error();
+            return parse_error(absl::StrCat("Size of float_list is ",
+                                            float_list.tensor().dims(),
+                                            ", expected ", out_shape.dims()));
           }
           break;
         }
@@ -1810,7 +1851,7 @@ Status FastParseSingleExample(const Config& config, StringPiece serialized,
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Private helper functions for FastParseSequenceExample.
@@ -1823,7 +1864,7 @@ struct FeatureProtos {
   // Proto substrings from each serialized SequenceExample that correspond
   // with this feature.  `protos_present` records whether the proto had a
   // value defined (even if that value is empty).
-  std::vector<StringPiece> protos;
+  std::vector<absl::string_view> protos;
   std::vector<bool> protos_present;
 
   // Information derived from protos:
@@ -1836,9 +1877,9 @@ struct FeatureProtos {
 };
 
 // Map from feature name to FeatureProtos for that feature.
-using FeatureProtosMap = absl::flat_hash_map<StringPiece, FeatureProtos>;
+using FeatureProtosMap = absl::flat_hash_map<absl::string_view, FeatureProtos>;
 
-string ExampleName(const gtl::ArraySlice<tstring> example_names, int n) {
+std::string ExampleName(const absl::Span<const tstring> example_names, int n) {
   return example_names.empty() ? "<unknown>" : example_names[n];
 }
 
@@ -1847,14 +1888,14 @@ string ExampleName(const gtl::ArraySlice<tstring> example_names, int n) {
 inline int ParseBytesFeature(protobuf::io::CodedInputStream* stream,
                              tstring* out) {
   int num_elements = 0;
-  uint32 length;
+  uint32_t length;
   if (!stream->ExpectTag(kDelimitedTag(1)) || !stream->ReadVarint32(&length)) {
     return -1;
   }
   if (length > 0) {
     auto limit = stream->PushLimit(length);
     while (!stream->ExpectAtEnd()) {
-      uint32 bytes_length;
+      uint32_t bytes_length;
       if (!stream->ExpectTag(kDelimitedTag(1)) ||
           !stream->ReadVarint32(&bytes_length)) {
         return -1;
@@ -1892,22 +1933,22 @@ inline void PadInt64Feature(int num_to_pad, int64_t* out) {
 inline int ParseFloatFeature(protobuf::io::CodedInputStream* stream,
                              float* out) {
   int num_elements = 0;
-  uint32 length;
+  uint32_t length;
   if (!stream->ExpectTag(kDelimitedTag(2)) || !stream->ReadVarint32(&length)) {
     return -1;
   }
   if (length > 0) {
     auto limit = stream->PushLimit(length);
-    uint8 peek_tag = PeekTag(stream);
+    uint8_t peek_tag = PeekTag(stream);
     if (peek_tag == kDelimitedTag(1)) {  // packed
-      uint32 packed_length;
+      uint32_t packed_length;
       if (!stream->ExpectTag(kDelimitedTag(1)) ||
           !stream->ReadVarint32(&packed_length)) {
         return -1;
       }
       auto packed_limit = stream->PushLimit(packed_length);
       while (!stream->ExpectAtEnd()) {
-        uint32 buffer32;
+        uint32_t buffer32;
         if (!stream->ReadLittleEndian32(&buffer32)) {
           return -1;
         }
@@ -1919,7 +1960,7 @@ inline int ParseFloatFeature(protobuf::io::CodedInputStream* stream,
       stream->PopLimit(packed_limit);
     } else if (peek_tag == kFixed32Tag(1)) {
       while (!stream->ExpectAtEnd()) {
-        uint32 buffer32;
+        uint32_t buffer32;
         if (!stream->ExpectTag(kFixed32Tag(1)) ||
             !stream->ReadLittleEndian32(&buffer32)) {
           return -1;
@@ -1943,15 +1984,15 @@ inline int ParseFloatFeature(protobuf::io::CodedInputStream* stream,
 inline int ParseInt64Feature(protobuf::io::CodedInputStream* stream,
                              int64_t* out) {
   int num_elements = 0;
-  uint32 length;
+  uint32_t length;
   if (!stream->ExpectTag(kDelimitedTag(3)) || !stream->ReadVarint32(&length)) {
     return -1;
   }
   if (length > 0) {
     auto limit = stream->PushLimit(length);
-    uint8 peek_tag = PeekTag(stream);
+    uint8_t peek_tag = PeekTag(stream);
     if (peek_tag == kDelimitedTag(1)) {  // packed
-      uint32 packed_length;
+      uint32_t packed_length;
       if (!stream->ExpectTag(kDelimitedTag(1)) ||
           !stream->ReadVarint32(&packed_length)) {
         return -1;
@@ -2035,7 +2076,7 @@ inline int GetFeatureLength(DataType dtype,
 }
 
 inline DataType ParseDataType(protobuf::io::CodedInputStream* stream) {
-  uint8 peek_tag = PeekTag(stream);
+  uint8_t peek_tag = PeekTag(stream);
   switch (peek_tag) {
     case kDelimitedTag(1):
       return DT_STRING;
@@ -2069,19 +2110,19 @@ inline bool SkipEmptyFeature(protobuf::io::CodedInputStream* stream,
     default:
       return false;
   }
-  uint32 length;
+  uint32_t length;
   return stream->ReadVarint32(&length) && length == 0;
 }
 
 // Reads an example proto, and extracts a StringPiece pointer to each feature.
-Status ExtractFeaturesFromSequenceExamples(
-    const gtl::ArraySlice<tstring> examples,
-    const gtl::ArraySlice<tstring> example_names,
+absl::Status ExtractFeaturesFromSequenceExamples(
+    const absl::Span<const tstring> examples,
+    const absl::Span<const tstring> example_names,
     FeatureProtosMap* context_features, FeatureProtosMap* sequence_features) {
   for (int d = 0; d < examples.size(); d++) {
     const tstring& example = examples[d];
     protobuf::io::CodedInputStream stream(
-        reinterpret_cast<const uint8*>(example.data()), example.size());
+        reinterpret_cast<const uint8_t*>(example.data()), example.size());
     // Not clear what this does. Why not stream.EnableAliasing()?
     EnableAliasing(&stream);
 
@@ -2100,7 +2141,7 @@ Status ExtractFeaturesFromSequenceExamples(
             ExampleName(example_names, d));
       }
       if (features != nullptr) {
-        uint32 length;
+        uint32_t length;
         if (!stream.ReadVarint32(&length)) {
           return errors::InvalidArgument(
               "Invalid protocol message input, example id: ",
@@ -2108,8 +2149,8 @@ Status ExtractFeaturesFromSequenceExamples(
         }
         auto limit = stream.PushLimit(length);
         while (!stream.ExpectAtEnd()) {
-          StringPiece key, value;
-          uint32 length;
+          absl::string_view key, value;
+          uint32_t length;
           if (!stream.ExpectTag(kDelimitedTag(1)) ||
               !stream.ReadVarint32(&length)) {
             return errors::InvalidArgument(
@@ -2138,20 +2179,21 @@ Status ExtractFeaturesFromSequenceExamples(
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Populates context_features[k].length based on context_features[k].protos
 // (for all k).
-Status GetContextFeatureLengths(const gtl::ArraySlice<tstring> example_names,
-                                FeatureProtosMap* context_features) {
+absl::Status GetContextFeatureLengths(
+    const absl::Span<const tstring> example_names,
+    FeatureProtosMap* context_features) {
   for (auto& c : *context_features) {
     FeatureProtos& feature = c.second;
     for (int d = 0; d < feature.protos.size(); ++d) {
       const auto& proto = feature.protos[d];
       if (proto.empty()) continue;
       protobuf::io::CodedInputStream stream(
-          reinterpret_cast<const uint8*>(proto.data()), proto.size());
+          reinterpret_cast<const uint8_t*>(proto.data()), proto.size());
       EnableAliasing(&stream);
       int num_elements = GetFeatureLength(feature.dtype, &stream);
       if (num_elements < 0) {
@@ -2173,13 +2215,14 @@ Status GetContextFeatureLengths(const gtl::ArraySlice<tstring> example_names,
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Populates sequence_features[k].length and sequence_features[k].num_rows based
 // on sequence_features[k].protos (for all k).
-Status GetSequenceFeatureLengths(const gtl::ArraySlice<tstring> example_names,
-                                 FeatureProtosMap* sequence_features) {
+absl::Status GetSequenceFeatureLengths(
+    const absl::Span<const tstring> example_names,
+    FeatureProtosMap* sequence_features) {
   for (auto& c : *sequence_features) {
     FeatureProtos& feature = c.second;
     for (int d = 0; d < feature.protos.size(); ++d) {
@@ -2189,10 +2232,10 @@ Status GetSequenceFeatureLengths(const gtl::ArraySlice<tstring> example_names,
       size_t num_rows = 0;
       size_t num_elements = 0;
       protobuf::io::CodedInputStream stream(
-          reinterpret_cast<const uint8*>(proto.data()), proto.size());
+          reinterpret_cast<const uint8_t*>(proto.data()), proto.size());
       EnableAliasing(&stream);
       while (!stream.ExpectAtEnd()) {
-        uint32 feature_bytes;
+        uint32_t feature_bytes;
         if (!stream.ExpectTag(kDelimitedTag(1)) ||
             !stream.ReadVarint32(&feature_bytes)) {
           return errors::InvalidArgument("Error in sequence feature ", c.first,
@@ -2240,7 +2283,7 @@ Status GetSequenceFeatureLengths(const gtl::ArraySlice<tstring> example_names,
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Copies src into dst[dst_offset:dst_offset+src.size], and then increments
@@ -2275,11 +2318,11 @@ void CopyTensorIntoTensor(DataType dtype, const Tensor& src, Tensor* dst,
 
 // Parses dense features in `context_features`, and writes their parsed
 // values to `context_results`.
-Status ParseContextDenseFeatures(const FeatureProtosMap& context_features,
-                                 const FastParseExampleConfig& context_config,
-                                 gtl::ArraySlice<tstring> example_names,
-                                 bool is_batch, int num_examples,
-                                 Allocator* allocator, Result* context_result) {
+absl::Status ParseContextDenseFeatures(
+    const FeatureProtosMap& context_features,
+    const FastParseExampleConfig& context_config,
+    absl::Span<const tstring> example_names, bool is_batch, int num_examples,
+    Allocator* allocator, Result* context_result) {
   for (int t = 0; t < context_config.dense.size(); ++t) {
     const auto& c = context_config.dense[t];
     const FeatureProtos& feature =
@@ -2321,7 +2364,7 @@ Status ParseContextDenseFeatures(const FeatureProtosMap& context_features,
         num_elements += c.default_value.NumElements();
       } else if (!feature_proto.empty()) {
         protobuf::io::CodedInputStream stream(
-            reinterpret_cast<const uint8*>(feature_proto.data()),
+            reinterpret_cast<const uint8_t*>(feature_proto.data()),
             feature_proto.size());
         EnableAliasing(&stream);
         num_elements += ParseFeature(dtype, &stream, &out, &out_offset);
@@ -2333,17 +2376,16 @@ Status ParseContextDenseFeatures(const FeatureProtosMap& context_features,
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Parses sparse features in `context_features`, and writes their parsed
 // values to `context_results`.
-Status ParseContextSparseFeatures(const FeatureProtosMap& context_features,
-                                  const FastParseExampleConfig& context_config,
-                                  gtl::ArraySlice<tstring> example_names,
-                                  bool is_batch, int num_examples,
-                                  Allocator* allocator,
-                                  Result* context_result) {
+absl::Status ParseContextSparseFeatures(
+    const FeatureProtosMap& context_features,
+    const FastParseExampleConfig& context_config,
+    absl::Span<const tstring> example_names, bool is_batch, int num_examples,
+    Allocator* allocator, Result* context_result) {
   for (int t = 0; t < context_config.sparse.size(); ++t) {
     const auto& c = context_config.sparse[t];
     const FeatureProtos& feature =
@@ -2372,7 +2414,7 @@ Status ParseContextSparseFeatures(const FeatureProtosMap& context_features,
       const auto& feature_proto = feature.protos[e];
       if (feature_proto.empty()) continue;
       protobuf::io::CodedInputStream stream(
-          reinterpret_cast<const uint8*>(feature_proto.data()),
+          reinterpret_cast<const uint8_t*>(feature_proto.data()),
           feature_proto.size());
       EnableAliasing(&stream);
       size_t num_added =
@@ -2395,17 +2437,16 @@ Status ParseContextSparseFeatures(const FeatureProtosMap& context_features,
       out_shape(0) = max_num_cols;
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Parses ragged features in `context_features`, and writes their parsed
 // values to `context_results`.
-Status ParseContextRaggedFeatures(const FeatureProtosMap& context_features,
-                                  const FastParseExampleConfig& context_config,
-                                  gtl::ArraySlice<tstring> example_names,
-                                  bool is_batch, int num_examples,
-                                  Allocator* allocator,
-                                  Result* context_result) {
+absl::Status ParseContextRaggedFeatures(
+    const FeatureProtosMap& context_features,
+    const FastParseExampleConfig& context_config,
+    absl::Span<const tstring> example_names, bool is_batch, int num_examples,
+    Allocator* allocator, Result* context_result) {
   for (int t = 0; t < context_config.ragged.size(); ++t) {
     const auto& c = context_config.ragged[t];
     const FeatureProtos& feature =
@@ -2423,9 +2464,9 @@ Status ParseContextRaggedFeatures(const FeatureProtosMap& context_features,
         Tensor(allocator, splits_dtype, splits_shape);
     Tensor& out_values = context_result->ragged_values[t];
     size_t out_values_offset = 0;
-    int32* int32_splits =
+    int32_t* int32_splits =
         is_batch && splits_dtype == DT_INT32
-            ? context_result->ragged_splits[t].vec<int32>().data()
+            ? context_result->ragged_splits[t].vec<int32_t>().data()
             : nullptr;
     int64_t* int64_splits =
         is_batch && splits_dtype == DT_INT64
@@ -2443,7 +2484,7 @@ Status ParseContextRaggedFeatures(const FeatureProtosMap& context_features,
       const auto& feature_proto = feature.protos[e];
       if (!feature_proto.empty()) {
         protobuf::io::CodedInputStream stream(
-            reinterpret_cast<const uint8*>(feature_proto.data()),
+            reinterpret_cast<const uint8_t*>(feature_proto.data()),
             feature_proto.size());
         EnableAliasing(&stream);
         size_t num_added =
@@ -2464,7 +2505,7 @@ Status ParseContextRaggedFeatures(const FeatureProtosMap& context_features,
       int actual_splits =
           int32_splits
               ? int32_splits -
-                    context_result->ragged_splits[t].vec<int32>().data()
+                    context_result->ragged_splits[t].vec<int32_t>().data()
               : int64_splits -
                     context_result->ragged_splits[t].vec<int64_t>().data();
       if (actual_splits != num_examples + 1) {
@@ -2473,17 +2514,17 @@ Status ParseContextRaggedFeatures(const FeatureProtosMap& context_features,
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Parses dense features in `sequence_features`, and writes their parsed
 // values to `sequence_result`.
-Status ParseSequenceDenseFeatures(const FeatureProtosMap& sequence_features,
-                                  const FastParseExampleConfig& sequence_config,
-                                  gtl::ArraySlice<tstring> example_names,
-                                  bool is_batch, int num_examples,
-                                  Allocator* allocator, Result* sequence_result,
-                                  std::vector<Tensor>* dense_feature_lengths) {
+absl::Status ParseSequenceDenseFeatures(
+    const FeatureProtosMap& sequence_features,
+    const FastParseExampleConfig& sequence_config,
+    absl::Span<const tstring> example_names, bool is_batch, int num_examples,
+    Allocator* allocator, Result* sequence_result,
+    std::vector<Tensor>* dense_feature_lengths) {
   TensorShape dense_length_shape;
   if (is_batch) {
     dense_length_shape.AddDim(num_examples);
@@ -2556,11 +2597,11 @@ Status ParseSequenceDenseFeatures(const FeatureProtosMap& sequence_features,
         }
       } else if (!feature_proto.empty()) {
         protobuf::io::CodedInputStream stream(
-            reinterpret_cast<const uint8*>(feature_proto.data()),
+            reinterpret_cast<const uint8_t*>(feature_proto.data()),
             feature_proto.size());
         EnableAliasing(&stream);
         while (!stream.ExpectAtEnd()) {
-          uint32 feature_length;
+          uint32_t feature_length;
           if (!stream.ExpectTag(kDelimitedTag(1)) ||
               !stream.ReadVarint32(&feature_length)) {
             return errors::InvalidArgument("Error in sequence feature ",
@@ -2627,15 +2668,15 @@ Status ParseSequenceDenseFeatures(const FeatureProtosMap& sequence_features,
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Parses sparse features in `sequence_features`, and writes their parsed
 // values to `sequence_result`.
-Status ParseSequenceSparseFeatures(
+absl::Status ParseSequenceSparseFeatures(
     const FeatureProtosMap& sequence_features,
     const FastParseExampleConfig& sequence_config,
-    gtl::ArraySlice<tstring> example_names, bool is_batch, int num_examples,
+    absl::Span<const tstring> example_names, bool is_batch, int num_examples,
     Allocator* allocator, Result* sequence_result) {
   for (int t = 0; t < sequence_config.sparse.size(); ++t) {
     const auto& c = sequence_config.sparse[t];
@@ -2681,12 +2722,12 @@ Status ParseSequenceSparseFeatures(
       const auto& feature_proto = feature.protos[e];
       if (feature_proto.empty()) continue;
       protobuf::io::CodedInputStream stream(
-          reinterpret_cast<const uint8*>(feature_proto.data()),
+          reinterpret_cast<const uint8_t*>(feature_proto.data()),
           feature_proto.size());
       EnableAliasing(&stream);
       size_t num_rows = 0;
       while (!stream.ExpectAtEnd()) {
-        uint32 feature_length;
+        uint32_t feature_length;
         if (!stream.ExpectTag(kDelimitedTag(1)) ||
             !stream.ReadVarint32(&feature_length)) {
           // This should be unreachable -- we already scanned the feature in
@@ -2755,15 +2796,15 @@ Status ParseSequenceSparseFeatures(
       out_shape(1) = max_num_cols;
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Parses ragged features in `sequence_features`, and writes their parsed
 // values to `sequence_result`.
-Status ParseSequenceRaggedFeatures(
+absl::Status ParseSequenceRaggedFeatures(
     const FeatureProtosMap& sequence_features,
     const FastParseExampleConfig& sequence_config,
-    gtl::ArraySlice<tstring> example_names, bool is_batch, int num_examples,
+    absl::Span<const tstring> example_names, bool is_batch, int num_examples,
     Allocator* allocator, Result* sequence_result) {
   for (int t = 0; t < sequence_config.ragged.size(); ++t) {
     const auto& c = sequence_config.ragged[t];
@@ -2786,17 +2827,17 @@ Status ParseSequenceRaggedFeatures(
         Tensor(allocator, splits_dtype, outer_splits_shape);
     Tensor& out_values = sequence_result->ragged_values[t];
     size_t out_values_offset = 0;
-    int32* int32_inner_splits =
+    int32_t* int32_inner_splits =
         splits_dtype == DT_INT32
-            ? sequence_result->ragged_splits[t].vec<int32>().data()
+            ? sequence_result->ragged_splits[t].vec<int32_t>().data()
             : nullptr;
     int64_t* int64_inner_splits =
         splits_dtype == DT_INT64
             ? sequence_result->ragged_splits[t].vec<int64_t>().data()
             : nullptr;
-    int32* int32_outer_splits =
+    int32_t* int32_outer_splits =
         is_batch && splits_dtype == DT_INT32
-            ? sequence_result->ragged_outer_splits[t].vec<int32>().data()
+            ? sequence_result->ragged_outer_splits[t].vec<int32_t>().data()
             : nullptr;
     int64_t* int64_outer_splits =
         is_batch && splits_dtype == DT_INT64
@@ -2820,11 +2861,11 @@ Status ParseSequenceRaggedFeatures(
       const auto& feature_proto = feature.protos[e];
       if (!feature_proto.empty()) {
         protobuf::io::CodedInputStream stream(
-            reinterpret_cast<const uint8*>(feature_proto.data()),
+            reinterpret_cast<const uint8_t*>(feature_proto.data()),
             feature_proto.size());
         EnableAliasing(&stream);
         while (!stream.ExpectAtEnd()) {
-          uint32 feature_length;
+          uint32_t feature_length;
           if (!stream.ExpectTag(kDelimitedTag(1)) ||
               !stream.ReadVarint32(&feature_length)) {
             // This should be unreachable -- we already scanned the feature in
@@ -2881,7 +2922,7 @@ Status ParseSequenceRaggedFeatures(
       const auto& inner_splits = sequence_result->ragged_splits[t];
       int num_inner_splits =
           int32_inner_splits
-              ? int32_inner_splits - inner_splits.vec<int32>().data()
+              ? int32_inner_splits - inner_splits.vec<int32_t>().data()
               : int64_inner_splits - inner_splits.vec<int64_t>().data();
       if (num_inner_splits != expected_num_rows + 1) {
         return errors::InvalidArgument("Unexpected number of rows for feature ",
@@ -2892,7 +2933,7 @@ Status ParseSequenceRaggedFeatures(
       const auto& outer_splits = sequence_result->ragged_outer_splits[t];
       int num_outer_splits =
           int32_outer_splits
-              ? int32_outer_splits - outer_splits.vec<int32>().data()
+              ? int32_outer_splits - outer_splits.vec<int32_t>().data()
               : int64_outer_splits - outer_splits.vec<int64_t>().data();
       if (num_outer_splits != num_examples + 1) {
         return errors::InvalidArgument(
@@ -2900,21 +2941,20 @@ Status ParseSequenceRaggedFeatures(
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
 
 // TODO(sundberg): Use the threadpool to parallelize example parsing.
 // TODO(b/111553342): Support extracting feature statistics from the examples.
-Status FastParseSequenceExample(const FastParseExampleConfig& context_config,
-                                const FastParseExampleConfig& sequence_config,
-                                gtl::ArraySlice<tstring> serialized,
-                                gtl::ArraySlice<tstring> example_names,
-                                thread::ThreadPool* thread_pool,
-                                Result* context_result, Result* sequence_result,
-                                std::vector<Tensor>* dense_feature_lengths,
-                                bool is_batch) {
+absl::Status FastParseSequenceExample(
+    const FastParseExampleConfig& context_config,
+    const FastParseExampleConfig& sequence_config,
+    absl::Span<const tstring> serialized,
+    absl::Span<const tstring> example_names, thread::ThreadPool* thread_pool,
+    Result* context_result, Result* sequence_result,
+    std::vector<Tensor>* dense_feature_lengths, bool is_batch) {
   int num_examples = serialized.size();
   DCHECK(context_result != nullptr);
   DCHECK(sequence_result != nullptr);
@@ -3062,7 +3102,7 @@ Status FastParseSequenceExample(const FastParseExampleConfig& context_config,
       sequence_features, sequence_config, example_names, is_batch, num_examples,
       allocator, sequence_result));
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace example

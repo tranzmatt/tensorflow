@@ -1,6 +1,10 @@
-load("//tensorflow:tensorflow.bzl", "pybind_extension")
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.bzl", "py_test")
+load("//tensorflow:tensorflow.default.bzl", "pybind_extension")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -10,8 +14,7 @@ package(
 py_binary(
     name = "modify_model_interface",
     srcs = ["modify_model_interface.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":modify_model_interface_constants",
         ":modify_model_interface_lib",
@@ -23,40 +26,49 @@ py_binary(
 py_library(
     name = "modify_model_interface_lib",
     srcs = ["modify_model_interface_lib.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":_pywrap_modify_model_interface",
         ":modify_model_interface_constants",
-        "//tensorflow:tensorflow_py",
         "//tensorflow/lite/python:schema_py",
     ],
 )
 
+# Use --config=disable_tf_lite_py when running this test under github.
 py_test(
     name = "modify_model_interface_lib_test",
     srcs = ["modify_model_interface_lib_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":modify_model_interface_lib",
-        "//tensorflow:tensorflow_py",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_test_lib",
+        #internal proto upb dep
         "//third_party/py/numpy",
+        "//tensorflow:tensorflow_py",
+        "//tensorflow/lite/python:lite",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/platform:client_testlib",
     ],
 )
 
 py_library(
     name = "modify_model_interface_constants",
     srcs = ["modify_model_interface_constants.py"],
-    srcs_version = "PY3",
-    deps = ["//tensorflow/python:dtypes"],
+    strict_deps = True,
+    deps = ["//tensorflow/python/framework:dtypes"],
 )
 
 pybind_extension(
     name = "_pywrap_modify_model_interface",
     srcs = ["modify_model_interface.cc"],
-    module_name = "_pywrap_modify_model_interface",
+    common_lib_packages = [
+        "litert/python",
+        "tensorflow/lite/python",
+    ],
+    enable_stub_generation = True,
+    pytype_srcs = [
+        "_pywrap_modify_model_interface.pyi",
+    ],
+    wrap_py_init = True,
     deps = [
         "//tensorflow/lite/schema:schema_fbs",
         "//tensorflow/lite/tools/optimize:modify_model_interface",

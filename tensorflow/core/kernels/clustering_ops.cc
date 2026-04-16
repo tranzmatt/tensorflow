@@ -26,12 +26,12 @@
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/lib/core/blocking_counter.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/gtl/top_n.h"
 #include "tensorflow/core/lib/random/philox_random.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
+#include "tensorflow/core/platform/blocking_counter.h"
 #include "tensorflow/core/platform/byte_order.h"
 #include "tensorflow/core/platform/cpu_info.h"
 #include "tensorflow/core/platform/logging.h"
@@ -147,7 +147,7 @@ class KmeansPlusPlusInitializationOp : public OpKernel {
     min_distances.fill(std::numeric_limits<float>::infinity());
     Eigen::VectorXf min_distances_cumsum(num_points);
 
-    auto draw_one_sample = [&]() -> int64 {
+    auto draw_one_sample = [&]() -> int64_t {
       if (sampled_indices.empty()) return rng.Uniform64(num_points);
       int64_t index = 0;
       do {

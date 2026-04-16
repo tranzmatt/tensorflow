@@ -18,6 +18,9 @@ limitations under the License.
 #include <string.h>
 #include <sys/types.h>
 #include <zlib.h>
+
+#include <csetjmp>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,6 +28,10 @@ limitations under the License.
 // provokes a compile error. We instead let png.h include what is needed.
 
 #include "absl/base/casts.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/strings/string_view.h"
+#include "png.h"  // from @png
 #include "tensorflow/core/lib/png/png_io.h"
 #include "tensorflow/core/platform/byte_order.h"
 #include "tensorflow/core/platform/logging.h"
@@ -46,8 +53,8 @@ namespace {
                                        (del)))
 
 // Convert from 8 bit components to 16. This works in-place.
-static void Convert8to16(const uint8* p8, int num_comps, int p8_row_bytes,
-                         int width, int height_in, uint16* p16,
+static void Convert8to16(const uint8_t* p8, int num_comps, int p8_row_bytes,
+                         int width, int height_in, uint16_t* p16,
                          int p16_row_bytes) {
   // Force height*row_bytes computations to use 64 bits. Height*width is
   // enforced to < 29 bits in decode_png_op.cc, but height*row_bytes is
@@ -57,17 +64,18 @@ static void Convert8to16(const uint8* p8, int num_comps, int p8_row_bytes,
 
   // Adjust pointers to copy backwards
   width *= num_comps;
-  CPTR_INC(uint8, p8, (height - 1) * p8_row_bytes + (width - 1) * sizeof(*p8));
-  PTR_INC(uint16, p16,
+  CPTR_INC(uint8_t, p8,
+           (height - 1) * p8_row_bytes + (width - 1) * sizeof(*p8));
+  PTR_INC(uint16_t, p16,
           (height - 1) * p16_row_bytes + (width - 1) * sizeof(*p16));
   int bump8 = width * sizeof(*p8) - p8_row_bytes;
   int bump16 = width * sizeof(*p16) - p16_row_bytes;
   for (; height-- != 0;
-       CPTR_INC(uint8, p8, bump8), PTR_INC(uint16, p16, bump16)) {
+       CPTR_INC(uint8_t, p8, bump8), PTR_INC(uint16_t, p16, bump16)) {
     for (int w = width; w-- != 0; --p8, --p16) {
-      uint32 pix = *p8;
+      uint32_t pix = *p8;
       pix |= pix << 8;
-      *p16 = static_cast<uint16>(pix);
+      *p16 = static_cast<uint16_t>(pix);
     }
   }
 }
@@ -77,7 +85,7 @@ static void Convert8to16(const uint8* p8, int num_comps, int p8_row_bytes,
 
 void ErrorHandler(png_structp png_ptr, png_const_charp msg) {
   DecodeContext* const ctx =
-      absl::bit_cast<DecodeContext*>(png_get_io_ptr(png_ptr));
+      absl::bit_cast<DecodeContext*>(png_get_error_ptr(png_ptr));
   ctx->error_condition = true;
   // To prevent log spam, errors are logged as VLOG(1) instead of ERROR.
   VLOG(1) << "PNG error: " << msg;
@@ -136,7 +144,7 @@ void CommonFreeDecode(DecodeContext* context) {
   }
 }
 
-bool DecodeHeader(StringPiece png_string, int* width, int* height,
+bool DecodeHeader(absl::string_view png_string, int* width, int* height,
                   int* components, int* channel_bit_depth,
                   std::vector<std::pair<std::string, std::string> >* metadata) {
   DecodeContext context;
@@ -197,7 +205,7 @@ bool DecodeHeader(StringPiece png_string, int* width, int* height,
   return true;
 }
 
-bool CommonInitDecode(StringPiece png_string, int desired_channels,
+bool CommonInitDecode(absl::string_view png_string, int desired_channels,
                       int desired_channel_bits, DecodeContext* context) {
   CHECK(desired_channel_bits == 8 || desired_channel_bits == 16)
       << "desired_channel_bits = " << desired_channel_bits;
@@ -222,7 +230,7 @@ bool CommonInitDecode(StringPiece png_string, int desired_channels,
     CommonFreeDecode(context);
     return false;
   }
-  context->data = absl::bit_cast<const uint8*>(png_string.data());
+  context->data = absl::bit_cast<const uint8_t*>(png_string.data());
   context->data_left = png_string.size();
   png_set_read_fn(context->png_ptr, context, StringReader);
   png_read_info(context->png_ptr, context->info_ptr);
@@ -335,9 +343,9 @@ bool CommonFinishDecode(png_bytep data, int row_bytes, DecodeContext* context) {
 
   // Synthesize 16 bits from 8 if requested.
   if (context->need_to_synthesize_16)
-    Convert8to16(absl::bit_cast<uint8*>(data), context->channels, row_bytes,
-                 context->width, context->height, absl::bit_cast<uint16*>(data),
-                 row_bytes);
+    Convert8to16(absl::bit_cast<uint8_t*>(data), context->channels, row_bytes,
+                 context->width, context->height,
+                 absl::bit_cast<uint16_t*>(data), row_bytes);
   return ok;
 }
 
@@ -354,8 +362,9 @@ bool WriteImageToBuffer(
 
   png_string->resize(0);
   png_infop info_ptr = nullptr;
-  png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr,
-                                                ErrorHandler, WarningHandler);
+  DecodeContext decode_context;
+  png_structp png_ptr = png_create_write_struct(
+      PNG_LIBPNG_VER_STRING, &decode_context, ErrorHandler, WarningHandler);
   if (png_ptr == nullptr) return false;
   if (setjmp(png_jmpbuf(png_ptr))) {
     png_destroy_write_struct(&png_ptr, info_ptr ? &info_ptr : nullptr);

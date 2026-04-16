@@ -1,5 +1,7 @@
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+
 package(
-    default_visibility = ["//tensorflow:internal"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -8,7 +10,7 @@ py_library(
     srcs = [
         "__init__.py",
     ],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         "//tensorflow/python/tpu:tpu_strategy_util",
     ],

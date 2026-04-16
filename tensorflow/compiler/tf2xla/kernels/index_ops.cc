@@ -17,23 +17,23 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2xla/kernels/index_ops.h"
 
+#include <cstdint>
+
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/arithmetic.h"
-#include "tensorflow/compiler/xla/shape_util.h"
-#include "tensorflow/core/framework/bounds_check.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
+#include "xla/hlo/builder/lib/arithmetic.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
-#include "tensorflow/core/framework/register_types.h"
-#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"
 
 namespace tensorflow {
 XlaArgMinMaxOp::XlaArgMinMaxOp(OpKernelConstruction* ctx, bool is_min)
-    : XlaOpKernel(ctx),
-      is_min_(is_min),
-      is_gpu_(ctx->device_type().type_string() == DEVICE_GPU_XLA_JIT) {}
+    : XlaOpKernel(ctx), is_min_(is_min) {}
 
 void XlaArgMinMaxOp::Compile(XlaOpKernelContext* ctx) {
   const TensorShape input_shape = ctx->InputShape(0);
@@ -65,21 +65,8 @@ void XlaArgMinMaxOp::Compile(XlaOpKernelContext* ctx) {
   OP_REQUIRES_OK(ctx, DataTypeToPrimitiveType(index_type, &index_xla_type));
 
   xla::XlaOp input = ctx->Input(0);
-  xla::XlaOp output;
-  // One pass ArgMin/ArgMax is slow on GPUs.
-  if (is_min_) {
-    if (is_gpu_) {
-      output = xla::ArgMinTwoPass(input, index_xla_type, axis);
-    } else {
-      output = xla::ArgMin(input, index_xla_type, axis, /*stable=*/true);
-    }
-  } else {
-    if (is_gpu_) {
-      output = xla::ArgMaxTwoPass(input, index_xla_type, axis);
-    } else {
-      output = xla::ArgMax(input, index_xla_type, axis, /*stable=*/true);
-    }
-  }
+  xla::XlaOp output =
+      xla::ArgMinMax(input, index_xla_type, axis, /*is_min=*/is_min_);
 
   ctx->SetOutput(0, output);
 }

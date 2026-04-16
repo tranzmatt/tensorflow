@@ -22,7 +22,7 @@ limitations under the License.
 #include <functional>
 #include <string>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -41,12 +41,8 @@ limitations under the License.
 #include "tensorflow/core/platform/stream_executor.h"
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-#if GOOGLE_CUDA
-#include "tensorflow/stream_executor/cuda/cuda_activation.h"
-using stream_executor::cuda::ScopedActivateExecutorContext;
-#elif TENSORFLOW_USE_ROCM
+#if TENSORFLOW_USE_ROCM
 #include "tensorflow/core/platform/rocm.h"
-using stream_executor::rocm::ScopedActivateExecutorContext;
 #endif
 
 namespace tensorflow {
@@ -56,12 +52,12 @@ typedef Eigen::ThreadPoolDevice CPUDevice;
 typedef Eigen::GpuDevice GPUDevice;
 using Callback = std::function<void()>;
 
-static inline Status ParseAndCheckBoxSizes(const Tensor& boxes,
-                                           const Tensor& box_index,
-                                           int* num_boxes) {
+static inline absl::Status ParseAndCheckBoxSizes(const Tensor& boxes,
+                                                 const Tensor& box_index,
+                                                 int* num_boxes) {
   if (boxes.NumElements() == 0 && box_index.NumElements() == 0) {
     *num_boxes = 0;
-    return Status::OK();
+    return absl::OkStatus();
   }
   // The shape of 'boxes' is [num_boxes, 4].
   if (boxes.dims() != 2) {
@@ -80,21 +76,23 @@ static inline Status ParseAndCheckBoxSizes(const Tensor& boxes,
   if (box_index.dim_size(0) != *num_boxes) {
     return errors::InvalidArgument("box_index has incompatible shape");
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Conditionally calls the compute callback if all values in box_index are in
 // [0, batch_size) then calls done.
 template <typename Device>
 inline void RunIfBoxIndexIsValid(
-    OpKernelContext* context, typename TTypes<int32, 1>::ConstTensor box_index,
-    int batch_size, const Callback& compute, const Callback& done);
+    OpKernelContext* context,
+    typename TTypes<int32_t, 1>::ConstTensor box_index, int batch_size,
+    const Callback& compute, const Callback& done);
 
 // Specialization of CheckValidBoxIndex for a CPUDevice.
 template <>
 inline void RunIfBoxIndexIsValid<CPUDevice>(
-    OpKernelContext* context, typename TTypes<int32, 1>::ConstTensor box_index,
-    int batch_size, const Callback& compute, const Callback& done) {
+    OpKernelContext* context,
+    typename TTypes<int32_t, 1>::ConstTensor box_index, int batch_size,
+    const Callback& compute, const Callback& done) {
   const int num_boxes = box_index.dimension(0);
   for (int b = 0; b < num_boxes; ++b) {
     OP_REQUIRES_ASYNC(
@@ -148,6 +146,16 @@ class CropAndResizeOp : public AsyncOpKernel {
     OP_REQUIRES_ASYNC(
         context, image_height > 0 && image_width > 0,
         errors::InvalidArgument("image dimensions must be positive"), done);
+    OP_REQUIRES_ASYNC(
+        context, boxes.dims() == 2,
+        absl::InvalidArgumentError(absl::StrCat("boxes must be 2-D, got: ",
+                                                boxes.shape().DebugString())),
+        done);
+    OP_REQUIRES_ASYNC(
+        context, TensorShapeUtils::IsVector(box_index.shape()),
+        errors::InvalidArgument("box_indices must be rank 1 but is shape ",
+                                box_index.shape().DebugString()),
+        done);
     int num_boxes = 0;
     OP_REQUIRES_OK_ASYNC(
         context, ParseAndCheckBoxSizes(boxes, box_index, &num_boxes), done);
@@ -163,7 +171,7 @@ class CropAndResizeOp : public AsyncOpKernel {
         done);
 
     // Copy and validate crop sizes.
-    auto crop_size_vec = crop_size.vec<int32>();
+    auto crop_size_vec = crop_size.vec<int32_t>();
     const int crop_height = internal::SubtleMustCopy(crop_size_vec(0));
     const int crop_width = internal::SubtleMustCopy(crop_size_vec(1));
     OP_REQUIRES_ASYNC(
@@ -186,7 +194,7 @@ class CropAndResizeOp : public AsyncOpKernel {
       const Tensor& box_index = context->input(2);
       const bool status = functor::CropAndResize<Device, T>()(
           context, image.tensor<T, 4>(), boxes.tensor<float, 2>(),
-          box_index.tensor<int32, 1>(), method_, extrapolation_value_,
+          box_index.tensor<int32_t, 1>(), method_, extrapolation_value_,
           output->tensor<float, 4>());
 
       if (!status) {
@@ -195,14 +203,14 @@ class CropAndResizeOp : public AsyncOpKernel {
       }
     };
 
-    RunIfBoxIndexIsValid<Device>(context, box_index.tensor<int32, 1>(),
+    RunIfBoxIndexIsValid<Device>(context, box_index.tensor<int32_t, 1>(),
                                  batch_size, std::move(compute_callback),
                                  std::move(done));
   }
 
  private:
   float extrapolation_value_;
-  string method_;
+  std::string method_;
 };
 
 // Partial specialization of CropAndResize functor for a CPUDevice.
@@ -212,8 +220,8 @@ struct CropAndResize<CPUDevice, T> {
   bool operator()(OpKernelContext* context,
                   typename TTypes<T, 4>::ConstTensor image,
                   typename TTypes<float, 2>::ConstTensor boxes,
-                  typename TTypes<int32, 1>::ConstTensor box_index,
-                  const string& method_name, float extrapolation_value,
+                  typename TTypes<int32_t, 1>::ConstTensor box_index,
+                  const std::string& method_name, float extrapolation_value,
                   typename TTypes<float, 4>::Tensor crops) {
     const int batch_size = image.dimension(0);
     const int image_height = image.dimension(1);
@@ -397,7 +405,7 @@ class CropAndResizeGradImageOp : public AsyncOpKernel {
                       errors::InvalidArgument("image_size must have 4 elements",
                                               image_size.shape().DebugString()),
                       done);
-    auto image_size_vec = image_size.vec<int32>();
+    auto image_size_vec = image_size.vec<int32_t>();
     const int batch_size = internal::SubtleMustCopy(image_size_vec(0));
     const int image_height = internal::SubtleMustCopy(image_size_vec(1));
     const int image_width = internal::SubtleMustCopy(image_size_vec(2));
@@ -434,7 +442,7 @@ class CropAndResizeGradImageOp : public AsyncOpKernel {
       const Tensor& box_index = context->input(2);
       const bool status = functor::CropAndResizeBackpropImage<Device, T>()(
           context, grads.tensor<float, 4>(), boxes.tensor<float, 2>(),
-          box_index.tensor<int32, 1>(), output->tensor<T, 4>(), method_);
+          box_index.tensor<int32_t, 1>(), output->tensor<T, 4>(), method_);
 
       if (!status) {
         context->SetStatus(errors::Internal(
@@ -442,13 +450,13 @@ class CropAndResizeGradImageOp : public AsyncOpKernel {
       }
     };
 
-    RunIfBoxIndexIsValid<Device>(context, box_index.tensor<int32, 1>(),
+    RunIfBoxIndexIsValid<Device>(context, box_index.tensor<int32_t, 1>(),
                                  batch_size, std::move(compute_callback),
                                  std::move(done));
   }
 
  private:
-  string method_;
+  std::string method_;
 };
 
 // Partial specialization of CropAndResizeBackpropImage functor for a CPUDevice.
@@ -458,9 +466,9 @@ struct CropAndResizeBackpropImage<CPUDevice, T> {
   bool operator()(const OpKernelContext* context,
                   typename TTypes<float, 4>::ConstTensor grads,
                   typename TTypes<float, 2>::ConstTensor boxes,
-                  typename TTypes<int32, 1>::ConstTensor box_index,
+                  typename TTypes<int32_t, 1>::ConstTensor box_index,
                   typename TTypes<T, 4>::Tensor grads_image,
-                  const string& method_name) {
+                  const std::string& method_name) {
     const int batch_size = grads_image.dimension(0);
     const int image_height = grads_image.dimension(1);
     const int image_width = grads_image.dimension(2);
@@ -577,7 +585,7 @@ class CropAndResizeGradBoxesOp : public AsyncOpKernel {
  public:
   explicit CropAndResizeGradBoxesOp(OpKernelConstruction* context)
       : AsyncOpKernel(context) {
-    string method;
+    std::string method;
     OP_REQUIRES_OK(context, context->GetAttr("method", &method));
     OP_REQUIRES(context, method == "bilinear",
                 errors::InvalidArgument("method must be 'bilinear'", method));
@@ -652,14 +660,14 @@ class CropAndResizeGradBoxesOp : public AsyncOpKernel {
       const bool status = functor::CropAndResizeBackpropBoxes<Device, T>()(
           context->eigen_device<Device>(), grads.tensor<float, 4>(),
           image.tensor<T, 4>(), boxes.tensor<float, 2>(),
-          box_index.tensor<int32, 1>(), output->tensor<float, 2>());
+          box_index.tensor<int32_t, 1>(), output->tensor<float, 2>());
       if (!status) {
         context->SetStatus(errors::Internal(
             "Failed to launch CropAndResizeBackpropBoxes kernel."));
       }
     };
 
-    RunIfBoxIndexIsValid<Device>(context, box_index.tensor<int32, 1>(),
+    RunIfBoxIndexIsValid<Device>(context, box_index.tensor<int32_t, 1>(),
                                  batch_size, std::move(compute_callback),
                                  std::move(done));
   }
@@ -673,7 +681,7 @@ struct CropAndResizeBackpropBoxes<CPUDevice, T> {
                   typename TTypes<float, 4>::ConstTensor grads,
                   typename TTypes<T, 4>::ConstTensor image,
                   typename TTypes<float, 2>::ConstTensor boxes,
-                  typename TTypes<int32, 1>::ConstTensor box_index,
+                  typename TTypes<int32_t, 1>::ConstTensor box_index,
                   typename TTypes<float, 2>::Tensor grads_boxes) {
     const int batch_size = image.dimension(0);
     const int image_height = image.dimension(1);
@@ -813,7 +821,7 @@ TF_CALL_double(REGISTER_KERNEL);
 namespace functor {
 template <>
 void CheckValidBoxIndexHelper<GPUDevice>::operator()(
-    const GPUDevice& d, typename TTypes<int32, 1>::ConstTensor box_index,
+    const GPUDevice& d, typename TTypes<int32_t, 1>::ConstTensor box_index,
     int batch_size, typename TTypes<bool, 0>::Tensor isvalid);
 extern template struct CheckValidBoxIndexHelper<GPUDevice>;
 }  // namespace functor
@@ -823,8 +831,9 @@ namespace {
 // Specialization of CheckValidBoxIndex for a GPUDevice.
 template <>
 inline void RunIfBoxIndexIsValid<GPUDevice>(
-    OpKernelContext* context, typename TTypes<int32, 1>::ConstTensor box_index,
-    int batch_size, const Callback& compute, const Callback& done) {
+    OpKernelContext* context,
+    typename TTypes<int32_t, 1>::ConstTensor box_index, int batch_size,
+    const Callback& compute, const Callback& done) {
   const int num_boxes = box_index.dimension(0);
   if (num_boxes == 0) {
     compute();
@@ -860,12 +869,11 @@ inline void RunIfBoxIndexIsValid<GPUDevice>(
       context->allocate_temp(DataTypeToEnum<bool>::value, TensorShape({}),
                              &isvalid_host_tensor, alloc_attr),
       done);
-  se::DeviceMemoryBase wrapped(isvalid_dev.data(), sizeof(bool));
+  stream_executor::DeviceAddressBase wrapped(isvalid_dev.data(), sizeof(bool));
   const bool status =
       stream
-          ->ThenMemcpy(
-              isvalid_host_tensor.scalar<bool>().data() /* destination */,
-              wrapped /* source */, sizeof(bool))
+          ->Memcpy(isvalid_host_tensor.scalar<bool>().data() /* destination */,
+                   wrapped /* source */, sizeof(bool))
           .ok();
   OP_REQUIRES_ASYNC(
       context, status,
@@ -877,20 +885,26 @@ inline void RunIfBoxIndexIsValid<GPUDevice>(
   TensorReference isvalid_dev_ref(isvalid_dev_tensor);
   auto wrapped_callback = [context, isvalid_host_tensor, isvalid_dev_ref,
                            compute, done]() {
-    auto stream = context->op_device_context()->stream();
-    ScopedActivateExecutorContext scoped_activation{stream->parent()};
-    const bool isvalid = isvalid_host_tensor.scalar<bool>()();
-    isvalid_dev_ref.Unref();
-    OP_REQUIRES_ASYNC(
-        context, isvalid,
-        errors::OutOfRange("box_index has values outside [0, batch_size)"),
-        done);
-    compute();
+    {
+      auto stream = context->op_device_context()->stream();
+      std::unique_ptr<se::ActivateContext> scoped_activation =
+          stream->parent()->Activate();
+      const bool isvalid = isvalid_host_tensor.scalar<bool>()();
+      isvalid_dev_ref.Unref();
+      OP_REQUIRES_ASYNC(
+          context, isvalid,
+          errors::OutOfRange("box_index has values outside [0, batch_size)"),
+          done);
+      compute();
+    }  // Release ActivateContext to prevent deadlock when done
+       // inlines another Op kernel, which may assume the original cuda Context.
+
     done();
   };
 
-  context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-      stream, wrapped_callback);
+  context->device()
+      ->tensorflow_accelerator_device_info()
+      ->event_mgr->ThenExecute(stream, wrapped_callback);
 }
 
 }  // namespace
@@ -913,7 +927,9 @@ inline void RunIfBoxIndexIsValid<GPUDevice>(
                               .TypeConstraint<T>("T"),             \
                           CropAndResizeGradBoxesOp<GPUDevice, T>);
 
-TF_CALL_GPU_NUMBER_TYPES(REGISTER_KERNEL);
+TF_CALL_half(REGISTER_KERNEL);
+TF_CALL_float(REGISTER_KERNEL);
+TF_CALL_double(REGISTER_KERNEL);
 
 #undef REGISTER_KERNEL
 

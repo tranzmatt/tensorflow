@@ -154,7 +154,7 @@ class RaggedTensorToSparseOp : public OpKernel {
 
  private:
   // Validate `rt_nested_splits` to ensure we don't get any segfaults.
-  static ::tensorflow::Status ValidateInputs(
+  static absl::Status ValidateInputs(
       std::vector<ConstFlatSplits> rt_nested_splits,
       const Tensor& rt_dense_values_in) {
     for (int i = 0; i < rt_nested_splits.size(); ++i) {
@@ -188,7 +188,7 @@ class RaggedTensorToSparseOp : public OpKernel {
           "Final value of ragged splits must match the length "
           "the corresponding ragged values.");
     }
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   // Build a list of index suffixes that should be added for each ragged item,
@@ -228,8 +228,8 @@ class RaggedTensorToSparseOp : public OpKernel {
 
 REGISTER_KERNEL_BUILDER(Name("RaggedTensorToSparse")
                             .Device(DEVICE_CPU)
-                            .TypeConstraint<int32>("Tsplits"),
-                        RaggedTensorToSparseOp<int32>);
+                            .TypeConstraint<int32_t>("Tsplits"),
+                        RaggedTensorToSparseOp<int32_t>);
 
 REGISTER_KERNEL_BUILDER(Name("RaggedTensorToSparse")
                             .Device(DEVICE_CPU)

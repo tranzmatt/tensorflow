@@ -17,7 +17,7 @@ limitations under the License.
 
 #define EIGEN_USE_GPU
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/kernels/scatter_nd_op.h"
 #include "tensorflow/core/platform/types.h"
@@ -98,7 +98,7 @@ template <typename T, typename Index, scatter_nd_op::UpdateOp op, int IXDIM>
 __global__ void ScatterNdOpKernel(
     const Index* indices, const T* updates, T* out,
     const Eigen::array<Eigen::DenseIndex, IXDIM> output_shape_prefix,
-    const Eigen::array<int64, IXDIM> batch_strides, const int64 num_indices,
+    const Eigen::array<int64_t, IXDIM> batch_strides, const int64_t num_indices,
     const Index slice_size) {
   auto update = LeftUpdate<T, op>();
 
@@ -141,14 +141,13 @@ struct ScatterNdFunctor<GPUDevice, T, Index, op, IXDIM> {
     const Eigen::DenseIndex batch_size = Tindices.dimension(0);
 
     // Index batch_strides[IXDIM];
-    Eigen::array<int64, IXDIM> batch_strides;
-    for (int dim = IXDIM - 1; dim >= 0; --dim) {
-      if (dim == IXDIM - 1) {
-        batch_strides[dim] = 1;
-      } else {
-        batch_strides[dim] =
-            batch_strides[dim + 1] * output_shape_prefix[dim + 1];
-      }
+    Eigen::array<int64_t, IXDIM> batch_strides;
+    if (IXDIM > 0) {
+      batch_strides[IXDIM - 1] = 1;
+    }
+    for (int dim = IXDIM - 2; dim >= 0; --dim) {
+      batch_strides[dim] =
+          batch_strides[dim + 1] * output_shape_prefix[dim + 1];
     }
 
     GpuLaunchConfig config = GetGpuLaunchConfig(Toutput.size(), d);

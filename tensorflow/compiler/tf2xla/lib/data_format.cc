@@ -15,13 +15,20 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2xla/lib/data_format.h"
 
-#include "tensorflow/compiler/xla/util.h"
+#include <cstdint>
+#include <vector>
+
+#include "absl/status/statusor.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/shape.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/util.h"
 #include "tensorflow/core/lib/core/errors.h"
 
 namespace tensorflow {
 namespace {
 
-StatusOr<xla::XlaOp> Contract(xla::XlaOp input, int64_t dim) {
+absl::StatusOr<xla::XlaOp> Contract(xla::XlaOp input, int64_t dim) {
   xla::XlaBuilder* builder = input.builder();
   TF_ASSIGN_OR_RETURN(xla::Shape input_shape, builder->GetShape(input));
 
@@ -32,10 +39,12 @@ StatusOr<xla::XlaOp> Contract(xla::XlaOp input, int64_t dim) {
 
   // Transpose the input so C is directly followed by VECT_C.
   std::vector<int64_t> permutation;
-  for (int64_t i = 0; i != input_shape.rank() - 1; ++i) {
+  const int64_t rank = input_shape.dimensions().size();
+  permutation.reserve(rank);
+  for (int64_t i = 0; i != rank - 1; ++i) {
     permutation.push_back(i);
     if (i == dim) {
-      permutation.push_back(input_shape.rank() - 1);
+      permutation.push_back(rank - 1);
     }
   }
 
@@ -47,7 +56,7 @@ StatusOr<xla::XlaOp> Contract(xla::XlaOp input, int64_t dim) {
   return xla::Reshape(xla::Transpose(input, permutation), contracted_shape);
 }
 
-StatusOr<xla::XlaOp> Expand(xla::XlaOp input, int64_t dim) {
+absl::StatusOr<xla::XlaOp> Expand(xla::XlaOp input, int64_t dim) {
   xla::XlaBuilder* builder = input.builder();
   TF_ASSIGN_OR_RETURN(xla::Shape input_shape, builder->GetShape(input));
 
@@ -66,7 +75,9 @@ StatusOr<xla::XlaOp> Expand(xla::XlaOp input, int64_t dim) {
 
   // Move the newly created dimension to the end with a transpose.
   std::vector<int64_t> permutation;
-  for (int64_t i = 0, end = expanded_shape.size(); i != end; ++i) {
+  const int64_t expanded_shape_size = expanded_shape.size();
+  permutation.reserve(expanded_shape_size);
+  for (int64_t i = 0; i != expanded_shape_size; ++i) {
     permutation.push_back(i);
     if (i == dim) {
       ++i;
@@ -79,11 +90,11 @@ StatusOr<xla::XlaOp> Expand(xla::XlaOp input, int64_t dim) {
 
 }  // namespace
 
-StatusOr<xla::XlaOp> NCHW_VECT_CToNCHW(xla::XlaOp input) {
+absl::StatusOr<xla::XlaOp> NCHW_VECT_CToNCHW(xla::XlaOp input) {
   return Contract(input, 1);
 }
 
-StatusOr<xla::XlaOp> NCHWToNCHW_VECT_C(xla::XlaOp input) {
+absl::StatusOr<xla::XlaOp> NCHWToNCHW_VECT_C(xla::XlaOp input) {
   return Expand(input, 1);
 }
 

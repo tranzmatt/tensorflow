@@ -35,56 +35,30 @@ void TensorList::Encode(VariantTensorData* data) const {
       invalid_indices.push_back(i);
     }
   }
-  string metadata;
+  std::string metadata;
   // TODO(b/118838800): Add a proto for storing the metadata.
   // Metadata format:
   // <num_invalid_tensors><invalid_indices><element_dtype><element_shape_proto>
-  core::PutVarint64(&metadata, static_cast<uint64>(invalid_indices.size()));
+  core::PutVarint64(&metadata, static_cast<uint64_t>(invalid_indices.size()));
   for (size_t i : invalid_indices) {
-    core::PutVarint64(&metadata, static_cast<uint64>(i));
+    core::PutVarint64(&metadata, static_cast<uint64_t>(i));
   }
-  core::PutVarint64(&metadata, static_cast<uint64>(element_dtype));
-  core::PutVarint64(&metadata, static_cast<uint64>(max_num_elements));
+  core::PutVarint64(&metadata, static_cast<uint64_t>(element_dtype));
+  core::PutVarint64(&metadata, static_cast<uint64_t>(max_num_elements));
   TensorShapeProto element_shape_proto;
   element_shape.AsProto(&element_shape_proto);
   element_shape_proto.AppendToString(&metadata);
   data->set_metadata(metadata);
 }
 
-static Status TensorListDeviceCopy(
-    const TensorList& from, TensorList* to,
-    const UnaryVariantOpRegistry::AsyncTensorDeviceCopyFn& copy) {
-  to->element_shape = from.element_shape;
-  to->element_dtype = from.element_dtype;
-  to->max_num_elements = from.max_num_elements;
-  to->tensors().reserve(from.tensors().size());
-  for (const Tensor& t : from.tensors()) {
-    to->tensors().emplace_back(t.dtype());
-    if (t.dtype() != DT_INVALID) {
-      TF_RETURN_IF_ERROR(copy(t, &to->tensors().back()));
-    }
-  }
-  return Status::OK();
-}
-
-#define REGISTER_LIST_COPY(DIRECTION)                                         \
-  INTERNAL_REGISTER_UNARY_VARIANT_DEVICE_COPY_FUNCTION(TensorList, DIRECTION, \
-                                                       TensorListDeviceCopy)
-
-REGISTER_LIST_COPY(VariantDeviceCopyDirection::HOST_TO_DEVICE);
-REGISTER_LIST_COPY(VariantDeviceCopyDirection::DEVICE_TO_HOST);
-REGISTER_LIST_COPY(VariantDeviceCopyDirection::DEVICE_TO_DEVICE);
-
-REGISTER_UNARY_VARIANT_DECODE_FUNCTION(TensorList, TensorList::kTypeName);
-
 bool TensorList::Decode(const VariantTensorData& data) {
   // TODO(srbs): Change the signature to Decode(VariantTensorData data) so
   // that we do not have to copy each tensor individually below. This would
   // require changing VariantTensorData::tensors() as well.
-  string metadata;
+  std::string metadata;
   data.get_metadata(&metadata);
-  uint64 scratch;
-  StringPiece iter(metadata);
+  uint64_t scratch;
+  absl::string_view iter(metadata);
   std::vector<size_t> invalid_indices;
   core::GetVarint64(&iter, &scratch);
   size_t num_invalid_tensors = static_cast<size_t>(scratch);
@@ -117,7 +91,7 @@ bool TensorList::Decode(const VariantTensorData& data) {
   core::GetVarint64(&iter, &scratch);
   max_num_elements = static_cast<int>(scratch);
   TensorShapeProto element_shape_proto;
-  element_shape_proto.ParseFromString(string(iter.data(), iter.size()));
+  element_shape_proto.ParseFromString(iter);
   element_shape = PartialTensorShape(element_shape_proto);
   return true;
 }

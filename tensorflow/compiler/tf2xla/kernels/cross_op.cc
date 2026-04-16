@@ -13,10 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <vector>
+
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
 
 namespace tensorflow {
 namespace {
@@ -49,6 +52,8 @@ class CrossOp : public XlaOpKernel {
 
     std::vector<int64_t> starts(in0_shape.dims(), 0);
     std::vector<int64_t> limits;
+    const auto& dim_sizes = in0_shape.dim_sizes();
+    limits.reserve(dim_sizes.size());
     for (auto dim_size : in0_shape.dim_sizes()) {
       limits.push_back(dim_size);
     }
@@ -79,7 +84,8 @@ class CrossOp : public XlaOpKernel {
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(CrossOp);
+  CrossOp(const CrossOp&) = delete;
+  void operator=(const CrossOp&) = delete;
 };
 
 REGISTER_XLA_OP(Name("Cross"), CrossOp);

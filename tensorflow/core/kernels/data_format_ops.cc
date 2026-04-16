@@ -21,7 +21,7 @@ limitations under the License.
 
 #include <map>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -69,9 +69,9 @@ class DataFormatDimMapOp : public OpKernel {
  public:
   explicit DataFormatDimMapOp(OpKernelConstruction* context)
       : OpKernel(context) {
-    string src_format;
+    std::string src_format;
     OP_REQUIRES_OK(context, context->GetAttr("src_format", &src_format));
-    string dst_format;
+    std::string dst_format;
     OP_REQUIRES_OK(context, context->GetAttr("dst_format", &dst_format));
     OP_REQUIRES(context, src_format.size() == 4 || src_format.size() == 5,
                 errors::InvalidArgument(
@@ -116,14 +116,14 @@ class DataFormatVecPermuteOp : public OpKernel {
  public:
   explicit DataFormatVecPermuteOp(OpKernelConstruction* context)
       : OpKernel(context) {
-    string src_format;
+    std::string src_format;
     OP_REQUIRES_OK(context, context->GetAttr("src_format", &src_format));
     OP_REQUIRES(context, src_format.size() == 4 || src_format.size() == 5,
                 errors::InvalidArgument(
                     "Source format must be of length 4 or 5, received "
                     "src_format = ",
                     src_format));
-    string dst_format;
+    std::string dst_format;
     OP_REQUIRES_OK(context, context->GetAttr("dst_format", &dst_format));
     OP_REQUIRES(context, dst_format.size() == 4 || dst_format.size() == 5,
                 errors::InvalidArgument("Destination format must be of length "
@@ -177,13 +177,13 @@ class DataFormatVecPermuteOp : public OpKernel {
                    context->allocate_output(0, input.shape(), &output));
     // Support 1D and 2D cases.
     Eigen::DSizes<Eigen::DenseIndex, 10> dst_idx;
-    string src_format_str = src_format_;
-    string dst_format_str = dst_format_;
+    std::string src_format_str = src_format_;
+    std::string dst_format_str = dst_format_;
     if (input.dim_size(0) == spatial_dim_count) {
       // If the input is a vector of size spatial_dim_count, treat the elements
       // as spatial dimensions.
       auto keep_only_spatial_dimensions =
-          [spatial_dim_count](string* format_str) -> void {
+          [spatial_dim_count](std::string* format_str) -> void {
         auto new_end =
             std::remove_if(format_str->begin(), format_str->end(),
                            [spatial_dim_count](const char dim) {
@@ -219,8 +219,8 @@ class DataFormatVecPermuteOp : public OpKernel {
   // Example: HWNC --> NHWC
   // 1D: dst = [1, 2, 0, 3],
   // 2D: dst = [2, 3, 4, 5, 0, 1, 6, 7]
-  static void ComputeDstIndex(const string& src_format_str,
-                              const string& dst_format_str, int num_dim,
+  static void ComputeDstIndex(const std::string& src_format_str,
+                              const std::string& dst_format_str, int num_dim,
                               Eigen::DSizes<Eigen::DenseIndex, 10>* dst) {
     for (int i = 0; i < src_format_str.size(); ++i) {
       for (int j = 0; j < dst_format_str.size(); ++j) {
@@ -233,8 +233,8 @@ class DataFormatVecPermuteOp : public OpKernel {
     }
   }
 
-  string src_format_;
-  string dst_format_;
+  std::string src_format_;
+  std::string dst_format_;
 };
 
 #define REGISTER_KERNEL(T)                                                \
@@ -304,14 +304,7 @@ TF_CALL_int64(DECLARE_GPU_SPECS);
 #define REGISTER_GPU_KERNEL(T)                                            \
   REGISTER_KERNEL_BUILDER(                                                \
       Name("DataFormatDimMap").Device(DEVICE_GPU).TypeConstraint<T>("T"), \
-      DataFormatDimMapOp<GPUDevice, T>);                                  \
-  REGISTER_KERNEL_BUILDER(Name("DataFormatDimMap")                        \
-                              .Device(DEVICE_GPU)                         \
-                              .HostMemory("x")                            \
-                              .HostMemory("y")                            \
-                              .Label("host")                              \
-                              .TypeConstraint<T>("T"),                    \
-                          DataFormatDimMapOp<CPUDevice, T>);
+      DataFormatDimMapOp<GPUDevice, T>);
 TF_CALL_int32(REGISTER_GPU_KERNEL);
 TF_CALL_int64(REGISTER_GPU_KERNEL);
 #undef REGISTER_GPU_KERNEL
@@ -319,17 +312,35 @@ TF_CALL_int64(REGISTER_GPU_KERNEL);
 #define REGISTER_GPU_KERNEL(T)                                                \
   REGISTER_KERNEL_BUILDER(                                                    \
       Name("DataFormatVecPermute").Device(DEVICE_GPU).TypeConstraint<T>("T"), \
-      DataFormatVecPermuteOp<GPUDevice, T>);                                  \
-  REGISTER_KERNEL_BUILDER(Name("DataFormatVecPermute")                        \
-                              .Device(DEVICE_GPU)                             \
-                              .HostMemory("x")                                \
-                              .HostMemory("y")                                \
-                              .Label("host")                                  \
-                              .TypeConstraint<T>("T"),                        \
-                          DataFormatVecPermuteOp<CPUDevice, T>);
+      DataFormatVecPermuteOp<GPUDevice, T>);
 TF_CALL_int32(REGISTER_GPU_KERNEL);
 TF_CALL_int64(REGISTER_GPU_KERNEL);
 #undef REGISTER_GPU_KERNEL
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+
+// Registration of the DEVICE_DEFAULT implementations.
+#define REGISTER_DEVICE_DEFAULT_KERNEL(T)              \
+  REGISTER_KERNEL_BUILDER(Name("DataFormatDimMap")     \
+                              .Device(DEVICE_DEFAULT)  \
+                              .HostMemory("x")         \
+                              .HostMemory("y")         \
+                              .Label("host")           \
+                              .TypeConstraint<T>("T"), \
+                          DataFormatDimMapOp<CPUDevice, T>);
+TF_CALL_int32(REGISTER_DEVICE_DEFAULT_KERNEL);
+TF_CALL_int64(REGISTER_DEVICE_DEFAULT_KERNEL);
+#undef REGISTER_DEVICE_DEFAULT_KERNEL
+
+#define REGISTER_DEVICE_DEFAULT_KERNEL(T)              \
+  REGISTER_KERNEL_BUILDER(Name("DataFormatVecPermute") \
+                              .Device(DEVICE_DEFAULT)  \
+                              .HostMemory("x")         \
+                              .HostMemory("y")         \
+                              .Label("host")           \
+                              .TypeConstraint<T>("T"), \
+                          DataFormatVecPermuteOp<CPUDevice, T>);
+TF_CALL_int32(REGISTER_DEVICE_DEFAULT_KERNEL);
+TF_CALL_int64(REGISTER_DEVICE_DEFAULT_KERNEL);
+#undef REGISTER_DEVICE_DEFAULT_KERNEL
 
 }  // namespace tensorflow

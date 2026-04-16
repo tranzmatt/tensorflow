@@ -46,8 +46,8 @@ typedef Eigen::ThreadPoolDevice CPUDevice;
 typedef Eigen::GpuDevice GPUDevice;
 
 static inline void ParseAttributeVec5(OpKernelConstruction* context,
-                                      const string& attr_name,
-                                      std::vector<int32>* attr) {
+                                      const std::string& attr_name,
+                                      std::vector<int32_t>* attr) {
   OP_REQUIRES_OK(context, context->GetAttr(attr_name, attr));
   OP_REQUIRES(
       context, (*attr)[0] == 1 && (*attr)[4] == 1,
@@ -112,14 +112,15 @@ class ExtractVolumePatchesOp : public UnaryOp<T> {
     int64_t out_planes = 0, out_rows = 0, out_cols = 0;
     int64_t pad_planes = 0, pad_rows = 0, pad_cols = 0;
     OP_REQUIRES_OK(context,
-                   GetWindowedOutputSize(in_planes, ksize_planes, stride_planes,
+                   GetWindowedOutputSize(in_planes, ksize_planes,
+                                         /*dilation_rate=*/1, stride_planes,
                                          padding_, &out_planes, &pad_planes));
-    OP_REQUIRES_OK(context,
-                   GetWindowedOutputSize(in_rows, ksize_rows, stride_rows,
-                                         padding_, &out_rows, &pad_rows));
-    OP_REQUIRES_OK(context,
-                   GetWindowedOutputSize(in_cols, ksize_cols, stride_cols,
-                                         padding_, &out_cols, &pad_cols));
+    OP_REQUIRES_OK(context, GetWindowedOutputSize(
+                                in_rows, ksize_rows, /*dilation_rate=*/1,
+                                stride_rows, padding_, &out_rows, &pad_rows));
+    OP_REQUIRES_OK(context, GetWindowedOutputSize(
+                                in_cols, ksize_cols, /*dilation_rate=*/1,
+                                stride_cols, padding_, &out_cols, &pad_cols));
 
     const std::vector<int64_t> out_sizes = {
         batch, out_planes, out_rows, out_cols,
@@ -142,13 +143,14 @@ class ExtractVolumePatchesOp : public UnaryOp<T> {
   }
 
  private:
-  std::vector<int32> ksizes_;
-  std::vector<int32> strides_;
+  std::vector<int32_t> ksizes_;
+  std::vector<int32_t> strides_;
   // std::vector<int32> rates_;
 
   Padding padding_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(ExtractVolumePatchesOp);
+  ExtractVolumePatchesOp(const ExtractVolumePatchesOp&) = delete;
+  void operator=(const ExtractVolumePatchesOp&) = delete;
 };
 
 // Registration of the CPU implementations.

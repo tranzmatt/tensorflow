@@ -13,24 +13,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <map>
+#include <string>
+#include <utility>
+
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #define EIGEN_USE_THREADS
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define EIGEN_USE_GPU
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-#include "tensorflow/core/kernels/rnn/lstm_ops.h"
-
-#include <memory>
 #include <vector>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/kernels/rnn/lstm_ops.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
 
@@ -63,12 +70,12 @@ void LSTMBlockCellFpropWithEigen(
   TensorBlasGemm<CPUDevice, T, false /* USE_CUBLAS */>::compute(
       ctx, d, false, false, typename gemm_compute_type<T>::type(1.f), const_xh,
       w, typename gemm_compute_type<T>::type(0.f), gates);
-  Eigen::array<Eigen::DenseIndex, 2> b_shape({1, b.dimensions()[0]});
-  Eigen::array<Eigen::DenseIndex, 2> broadcast_shape({cell.batch_size(), 1});
+  Eigen::array<Eigen::DenseIndex, 2> b_shape{1, b.dimensions()[0]};
+  Eigen::array<Eigen::DenseIndex, 2> broadcast_shape{cell.batch_size(), 1};
   gates.device(d) += b.reshape(b_shape).broadcast(broadcast_shape);
 
-  Eigen::array<Eigen::DenseIndex, 2> p_shape({1, cell.cell_size()});
-  Eigen::array<Eigen::DenseIndex, 2> p_broadcast_shape({cell.batch_size(), 1});
+  Eigen::array<Eigen::DenseIndex, 2> p_shape{1, cell.cell_size()};
+  Eigen::array<Eigen::DenseIndex, 2> p_broadcast_shape{cell.batch_size(), 1};
 
   // Input gate.
   if (use_peephole) {
@@ -150,8 +157,8 @@ void LSTMBlockCellBpropWithEigen(
   // dcs[t] += tanh'(cs[t]) .* dh[t] .* o[t] + dcs[t + 1] .* f[t + 1]
   dcs.device(d) = (co.constant(T(1)) - co * co) * h_grad * o + cs_grad;
 
-  Eigen::array<Eigen::DenseIndex, 2> p_shape({1, cell.cell_size()});
-  Eigen::array<Eigen::DenseIndex, 2> p_broadcast_shape({cell.batch_size(), 1});
+  Eigen::array<Eigen::DenseIndex, 2> p_shape{1, cell.cell_size()};
+  Eigen::array<Eigen::DenseIndex, 2> p_broadcast_shape{cell.batch_size(), 1};
   if (use_peephole) {
     dcs.device(d) =
         dcs + do_ * wco.reshape(p_shape).broadcast(p_broadcast_shape);
@@ -178,9 +185,9 @@ void LSTMBlockCellBpropWithEigen(
     cs_prev_grad.device(d) =
         cs_prev_grad + di * wci.reshape(p_shape).broadcast(p_broadcast_shape) +
         df * wcf.reshape(p_shape).broadcast(p_broadcast_shape);
-    wci_grad.device(d) = (di * cs_prev).sum(Eigen::array<int, 1>({0}));
-    wcf_grad.device(d) = (df * cs_prev).sum(Eigen::array<int, 1>({0}));
-    wco_grad.device(d) = (do_ * cs).sum(Eigen::array<int, 1>({0}));
+    wci_grad.device(d) = (di * cs_prev).sum(Eigen::array<int, 1>{0});
+    wcf_grad.device(d) = (df * cs_prev).sum(Eigen::array<int, 1>{0});
+    wco_grad.device(d) = (do_ * cs).sum(Eigen::array<int, 1>{0});
   }
 }
 
@@ -415,6 +422,70 @@ class LSTMBlockCellOp : public OpKernel {
                                       &gates_tensor));
 
     const Device& device = ctx->eigen_device<Device>();
+
+    // Sanity check that each of the tensors have the required NDIMS.
+    OP_REQUIRES(ctx, x_tensor->dims() == 2,
+                errors::InvalidArgument("x_tensor must be rank 2 but is rank ",
+                                        x_tensor->dims(), "."));
+    OP_REQUIRES(
+        ctx, cs_prev_tensor->dims() == 2,
+        errors::InvalidArgument("cs_prev_tensor must be rank 2 but is rank ",
+                                cs_prev_tensor->dims(), "."));
+    OP_REQUIRES(
+        ctx, cs_prev_tensor->dim_size(0) > 0 && cs_prev_tensor->dim_size(1) > 0,
+        errors::InvalidArgument("cs_prev_tensor is empty, has shape: (",
+                                cs_prev_tensor->dim_size(0), ",",
+                                cs_prev_tensor->dim_size(1), ")."));
+    OP_REQUIRES(
+        ctx, h_prev_tensor->dims() == 2,
+        errors::InvalidArgument("h_prev_tensor must be rank 2 but is rank ",
+                                h_prev_tensor->dims(), "."));
+    OP_REQUIRES(ctx, w_tensor->dims() == 2,
+                errors::InvalidArgument("w_tensor must be rank 2 but is rank ",
+                                        w_tensor->dims(), "."));
+    OP_REQUIRES(
+        ctx, wci_tensor->dims() == 1,
+        errors::InvalidArgument("wci_tensor must be rank 1 but is rank ",
+                                wci_tensor->dims(), "."));
+    OP_REQUIRES(
+        ctx, wcf_tensor->dims() == 1,
+        errors::InvalidArgument("wcf_tensor must be rank 1 but is rank ",
+                                wcf_tensor->dims(), "."));
+    OP_REQUIRES(
+        ctx, wco_tensor->dims() == 1,
+        errors::InvalidArgument("wco_tensor must be rank 1 but is rank ",
+                                wco_tensor->dims(), "."));
+    OP_REQUIRES(ctx, b_tensor->dims() == 1,
+                errors::InvalidArgument("b_tensor must be rank 1 but is rank ",
+                                        b_tensor->dims(), "."));
+    OP_REQUIRES(ctx, xh_tensor.dims() == 2,
+                errors::InvalidArgument("xh_tensor must be rank 2 but is rank ",
+                                        xh_tensor.dims(), "."));
+    OP_REQUIRES(ctx, i_tensor->dims() == 2,
+                errors::InvalidArgument("i_tensor must be rank 2 but is rank ",
+                                        i_tensor->dims(), "."));
+    OP_REQUIRES(ctx, cs_tensor->dims() == 2,
+                errors::InvalidArgument("cs_tensor must be rank 2 but is rank ",
+                                        cs_tensor->dims(), "."));
+    OP_REQUIRES(ctx, f_tensor->dims() == 2,
+                errors::InvalidArgument("f_tensor must be rank 2 but is rank ",
+                                        f_tensor->dims(), "."));
+    OP_REQUIRES(ctx, o_tensor->dims() == 2,
+                errors::InvalidArgument("o_tensor must be rank 2 but is rank ",
+                                        o_tensor->dims(), "."));
+    OP_REQUIRES(ctx, ci_tensor->dims() == 2,
+                errors::InvalidArgument("ci_tensor must be rank 2 but is rank ",
+                                        ci_tensor->dims(), "."));
+    OP_REQUIRES(ctx, co_tensor->dims() == 2,
+                errors::InvalidArgument("co_tensor must be rank 2 but is rank ",
+                                        co_tensor->dims(), "."));
+    OP_REQUIRES(
+        ctx, gates_tensor.dims() == 2,
+        errors::InvalidArgument("gates_tensor must be rank 2 but is rank ",
+                                gates_tensor.dims(), "."));
+    OP_REQUIRES(ctx, h_tensor->dims() == 2,
+                errors::InvalidArgument("h_tensor must be rank 2 but is rank ",
+                                        h_tensor->dims(), "."));
 
     functor::LSTMBlockCellFprop<Device, T, USE_CUBLAS, gate_layout>(
         batch_size, input_size, cell_size)(
@@ -741,7 +812,7 @@ class SliceHelper {
 
   // Slice through an input tensor. This may copy unaligned slices, but no
   // copying back will be done at the end.
-  const Tensor InputSlice(const Tensor& t, int pos, const string& name) {
+  Tensor InputSlice(const Tensor& t, int pos, const std::string& name) {
     Tensor res = UnalignedSlice(t, pos);
     if (res.IsAligned()) {
       return res;
@@ -752,7 +823,7 @@ class SliceHelper {
 
   // Slice through an output tensor. This may copy unaligned slices, and
   // schedule copying back on destruction.
-  Tensor OutputSlice(Tensor* t, int pos, const string& name) {
+  Tensor OutputSlice(Tensor* t, int pos, const std::string& name) {
     Tensor res = UnalignedSlice(*t, pos);
     if (res.IsAligned()) {
       return res;
@@ -790,7 +861,7 @@ class SliceHelper {
 
   // Assumes input is not aligned, creates a temporary aligned tensor of the
   // same shape and copies the original tensor's content into it.
-  Tensor AlignTensor(const Tensor& t, const string& name) {
+  Tensor AlignTensor(const Tensor& t, const std::string& name) {
     VLOG(1) << "AlignTensor called for " << name << ", shape "
             << t.shape().DebugString()
             << ". This is unnecessary copying. Consider using shapes with even "
@@ -816,7 +887,7 @@ class SliceHelper {
   std::vector<std::pair<Tensor, const Tensor>> copy_out_;
   // A pool of pre-allocated temporary tensors, with an indicator for whether
   // it's in use.
-  std::map<string, std::pair<Tensor, bool>> pool_;
+  std::map<std::string, std::pair<Tensor, bool>> pool_;
   // Op context
   OpKernelContext* ctx_ = nullptr;
   // Device
@@ -842,6 +913,10 @@ class BlockLSTMOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override {
     const Tensor* seq_len_max_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("seq_len_max", &seq_len_max_tensor));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(seq_len_max_tensor->shape()),
+                errors::InvalidArgument(
+                    "`seq_len_max_tensor` must be rank 0 but is rank ",
+                    seq_len_max_tensor->dims()));
 
     const Tensor* x;
     OP_REQUIRES_OK(ctx, ctx->input("x", &x));
@@ -997,6 +1072,9 @@ class BlockLSTMOp : public OpKernel {
           cs_tensor.matrix<T>(), f_tensor.matrix<T>(), o_tensor.matrix<T>(),
           ci_tensor.matrix<T>(), co_tensor.matrix<T>(),
           gates_tensor.matrix<T>(), h_tensor.matrix<T>());
+
+      if (!ctx->status().ok()) return;
+
       slicer.FinishTimeStep();
     }
 
@@ -1076,22 +1154,37 @@ class BlockLSTMGradOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override {
     const Tensor* seq_len_max_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("seq_len_max", &seq_len_max_tensor));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(seq_len_max_tensor->shape()),
+                errors::InvalidArgument(
+                    "`seq_len_max_tensor` must be rank 0 but is rank ",
+                    seq_len_max_tensor->dims()));
 
     const Tensor* x;
     OP_REQUIRES_OK(ctx, ctx->input("x", &x));
-    OP_REQUIRES(ctx, x->dims() == 3, errors::InvalidArgument("x must be 3D"));
+    OP_REQUIRES(
+        ctx, x->dims() == 3,
+        errors::InvalidArgument("x must be rank 3 but is rank ", x->dims()));
     const int64_t timelen = x->dim_size(0);
     const int64_t batch_size = x->dim_size(1);
     const int64_t input_size = x->dim_size(2);
 
     const Tensor* cs_prev_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("cs_prev", &cs_prev_tensor));
+    OP_REQUIRES(ctx, cs_prev_tensor->dims() == 2,
+                errors::InvalidArgument("cs_prev must be rank 2 but is rank ",
+                                        cs_prev_tensor->dims()));
 
     const Tensor* h_prev_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("h_prev", &h_prev_tensor));
+    OP_REQUIRES(ctx, h_prev_tensor->dims() == 2,
+                errors::InvalidArgument("h_prev must be rank 2 but is rank ",
+                                        h_prev_tensor->dims()));
 
     const Tensor* w_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("w", &w_tensor));
+    OP_REQUIRES(ctx, w_tensor->dims() == 2,
+                errors::InvalidArgument("w must be rank 2 but is rank ",
+                                        w_tensor->dims()));
     const int64_t cell_size = w_tensor->dim_size(1) / 4;
     OP_REQUIRES(ctx, input_size + cell_size == w_tensor->dim_size(0),
                 errors::InvalidArgument(
@@ -1100,15 +1193,27 @@ class BlockLSTMGradOp : public OpKernel {
 
     const Tensor* wci_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("wci", &wci_tensor));
+    OP_REQUIRES(ctx, wci_tensor->dims() == 1,
+                errors::InvalidArgument("wci must be rank 1 but is rank ",
+                                        wci_tensor->dims()));
 
     const Tensor* wcf_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("wcf", &wcf_tensor));
+    OP_REQUIRES(ctx, wcf_tensor->dims() == 1,
+                errors::InvalidArgument("wcf must be rank 1 but is rank ",
+                                        wcf_tensor->dims()));
 
     const Tensor* wco_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("wco", &wco_tensor));
+    OP_REQUIRES(ctx, wco_tensor->dims() == 1,
+                errors::InvalidArgument("wco must be rank 1 but is rank ",
+                                        wco_tensor->dims()));
 
     const Tensor* b_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("b", &b_tensor));
+    OP_REQUIRES(ctx, b_tensor->dims() == 1,
+                errors::InvalidArgument("b must be rank 1 but is rank ",
+                                        b_tensor->dims()));
     OP_REQUIRES(
         ctx, cell_size == b_tensor->dim_size(0) / 4,
         errors::InvalidArgument("w and b cell_size don't match: ", cell_size,
@@ -1134,6 +1239,28 @@ class BlockLSTMGradOp : public OpKernel {
 
     const Tensor* h_out = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("h", &h_out));
+
+    OP_REQUIRES(ctx, i_out->dims() == 3,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "i must be rank 3. Received: ", i_out->dims())));
+    OP_REQUIRES(ctx, cs_out->dims() == 3,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "cs must be rank 3. Received: ", cs_out->dims())));
+    OP_REQUIRES(ctx, f_out->dims() == 3,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "f must be rank 3. Received: ", f_out->dims())));
+    OP_REQUIRES(ctx, o_out->dims() == 3,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "o must be rank 3. Received: ", o_out->dims())));
+    OP_REQUIRES(ctx, ci_out->dims() == 3,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "ci must be rank 3. Received: ", ci_out->dims())));
+    OP_REQUIRES(ctx, co_out->dims() == 3,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "co must be rank 3. Received: ", co_out->dims())));
+    OP_REQUIRES(ctx, h_out->dims() == 3,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "h must be rank 3. Received: ", h_out->dims())));
 
     const Tensor* cs_grad = nullptr;
     OP_REQUIRES_OK(ctx, ctx->input("cs_grad", &cs_grad));

@@ -21,8 +21,8 @@ limitations under the License.
 #include <vector>
 
 #include "ruy/profiler/instrumentation.h"  // from @ruy
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/cpu_backend_context.h"
 #include "tensorflow/lite/kernels/cpu_backend_threadpool.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
@@ -225,25 +225,21 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
   cpu_backend_threadpool::Execute(tasks.size(), tasks.data(),              \
                                   cpu_backend_context);
 
-  switch (output_tensor->type) {
-    case kTfLiteFloat32: {
-      TF_LITE_MIRROR_PAD(float);
-      break;
-    }
-    case kTfLiteInt32: {
-      TF_LITE_MIRROR_PAD(int32_t);
-      break;
-    }
-    case kTfLiteUInt8: {
+  switch (TfLiteTypeGetSizeBits(output_tensor->type)) {
+    case 8: {
       TF_LITE_MIRROR_PAD(uint8_t);
       break;
     }
-    case kTfLiteInt8: {
-      TF_LITE_MIRROR_PAD(int8_t);
+    case 16: {
+      TF_LITE_MIRROR_PAD(uint16_t);
       break;
     }
-    case kTfLiteInt64: {
-      TF_LITE_MIRROR_PAD(int64_t);
+    case 32: {
+      TF_LITE_MIRROR_PAD(uint32_t);
+      break;
+    }
+    case 64: {
+      TF_LITE_MIRROR_PAD(uint64_t);
       break;
     }
     default:
@@ -272,7 +268,20 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   TF_LITE_ENSURE_EQ(context, SizeOfDimension(padding_matrix, 0),
                     NumDimensions(input_tensor));
 
-  if (!IsConstantTensor(padding_matrix)) {
+  if (input_tensor->type == kTfLiteUInt8 || input_tensor->type == kTfLiteInt8 ||
+      input_tensor->type == kTfLiteInt16) {
+    TF_LITE_ENSURE_EQ(context, input_tensor->params.scale,
+                      output_tensor->params.scale);
+    TF_LITE_ENSURE_EQ(context, input_tensor->params.zero_point,
+                      output_tensor->params.zero_point);
+  }
+
+  if (input_tensor->type == kTfLiteInt16) {
+    TF_LITE_ENSURE_EQ(context, input_tensor->params.zero_point, 0);
+    TF_LITE_ENSURE_EQ(context, output_tensor->params.zero_point, 0);
+  }
+
+  if (!IsConstantOrPersistentTensor(padding_matrix)) {
     SetTensorToDynamic(output_tensor);
     return kTfLiteOk;
   }

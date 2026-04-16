@@ -23,14 +23,14 @@ namespace tensorflow {
 
 namespace checkpoint {
 
-TensorSliceReaderCacheWrapper::TensorSliceReaderCacheWrapper() {}
+TensorSliceReaderCacheWrapper::TensorSliceReaderCacheWrapper() = default;
 TensorSliceReaderCacheWrapper::~TensorSliceReaderCacheWrapper() {
   delete cache_;
   cache_ = nullptr;
 }
 
 const TensorSliceReader* TensorSliceReaderCacheWrapper::GetReader(
-    const string& filepattern,
+    const std::string& filepattern,
     TensorSliceReader::OpenTableFunction open_function,
     int preferred_shard) const {
   mutex_lock l(mu_);
@@ -41,7 +41,7 @@ const TensorSliceReader* TensorSliceReaderCacheWrapper::GetReader(
                            preferred_shard);
 }
 
-TensorSliceReaderCache::TensorSliceReaderCache() {}
+TensorSliceReaderCache::TensorSliceReaderCache() = default;
 
 TensorSliceReaderCache::~TensorSliceReaderCache() {
   for (const auto& pair : readers_) {
@@ -50,7 +50,7 @@ TensorSliceReaderCache::~TensorSliceReaderCache() {
 }
 
 const TensorSliceReader* TensorSliceReaderCache::GetReader(
-    const string& filepattern,
+    const std::string& filepattern,
     TensorSliceReader::OpenTableFunction open_function, int preferred_shard) {
   mutex_lock l(mu_);
 

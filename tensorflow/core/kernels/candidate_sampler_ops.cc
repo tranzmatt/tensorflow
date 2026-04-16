@@ -18,9 +18,9 @@ limitations under the License.
 #define EIGEN_USE_THREADS
 
 #include <cfloat>
-#include <unordered_map>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/kernels/range_sampler.h"
@@ -71,14 +71,22 @@ class BaseCandidateSamplerOp : public OpKernel {
                    context->allocate_output(2, TensorShape({num_sampled_}),
                                             &out_sampled_expected_count));
 
-    gtl::ArraySlice<int64_t> true_candidate(
+    absl::Span<const int64_t> true_candidate(
         true_classes.matrix<int64_t>().data(), batch_size * num_true_);
-    gtl::MutableArraySlice<int64_t> sampled_candidate(
+
+    for (const auto& candidate : true_candidate) {
+      OP_REQUIRES(context, candidate >= 0 && candidate < sampler_->range(),
+                  errors::InvalidArgument("`true_candidate` out of range [", 0,
+                                          ", ", sampler_->range(),
+                                          "), received ", candidate));
+    }
+
+    absl::Span<int64_t> sampled_candidate(
         out_sampled_candidates->vec<int64_t>().data(), num_sampled_);
-    gtl::MutableArraySlice<float> true_expected_count(
+    absl::Span<float> true_expected_count(
         out_true_expected_count->matrix<float>().data(),
         batch_size * num_true_);
-    gtl::MutableArraySlice<float> sampled_expected_count(
+    absl::Span<float> sampled_expected_count(
         out_sampled_expected_count->vec<float>().data(), num_sampled_);
 
     // Approximately conservatively estimate the number of samples required.
@@ -102,8 +110,8 @@ class BaseCandidateSamplerOp : public OpKernel {
   void set_sampler(RangeSampler* sampler) { sampler_.reset(sampler); }
 
  private:
-  int32 num_true_;
-  int32 num_sampled_;
+  int32_t num_true_;
+  int32_t num_sampled_;
   bool unique_;
   std::unique_ptr<RangeSampler> sampler_;
   GuardedPhiloxRandom generator_;
@@ -153,7 +161,7 @@ class FixedUnigramCandidateSamplerOp : public BaseCandidateSamplerOp {
       : BaseCandidateSamplerOp(context) {
     int64_t range_max;
     OP_REQUIRES_OK(context, context->GetAttr("range_max", &range_max));
-    string vocab_file;
+    std::string vocab_file;
     OP_REQUIRES_OK(context, context->GetAttr("vocab_file", &vocab_file));
     std::vector<float> unigrams;
     OP_REQUIRES_OK(context, context->GetAttr("unigrams", &unigrams));
@@ -172,15 +180,14 @@ class FixedUnigramCandidateSamplerOp : public BaseCandidateSamplerOp {
     OP_REQUIRES_OK(context, context->GetAttr("num_shards", &num_shards));
     int64_t shard;
     OP_REQUIRES_OK(context, context->GetAttr("shard", &shard));
-
-    if (!vocab_file.empty()) {
-      set_sampler(new FixedUnigramSampler(context->env(), range_max, vocab_file,
-                                          distortion, num_reserved_ids,
-                                          num_shards, shard));
-    } else {
-      set_sampler(new FixedUnigramSampler(range_max, unigrams, distortion,
-                                          num_reserved_ids, num_shards, shard));
-    }
+    FixedUnigramSampler* sampler = new FixedUnigramSampler(
+        range_max, distortion, num_reserved_ids, num_shards, shard);
+    if (!vocab_file.empty())
+      OP_REQUIRES_OK(
+          context, sampler->SetDistributionSampler(context->env(), vocab_file));
+    else
+      OP_REQUIRES_OK(context, sampler->SetDistributionSampler(unigrams));
+    set_sampler(sampler);
   }
 };
 
@@ -212,8 +219,10 @@ class ComputeAccidentalHitsOp : public OpKernel {
                     "sampled_candidates must be a vector, which is typically "
                     "an output from CandidateSampler"));
 
-    std::unordered_map<int64_t, int> sampled_candidate_to_pos;
-    for (int64_t i = 0; i < in_sampled_candidates.dim_size(0); ++i) {
+    const int64_t num_sampled = in_sampled_candidates.dim_size(0);
+    absl::flat_hash_map<int64_t, int> sampled_candidate_to_pos;
+    sampled_candidate_to_pos.reserve(num_sampled);
+    for (int64_t i = 0; i < num_sampled; ++i) {
       sampled_candidate_to_pos[in_sampled_candidates.vec<int64_t>()(i)] = i;
     }
 
@@ -251,7 +260,7 @@ class ComputeAccidentalHitsOp : public OpKernel {
             2, TensorShape({static_cast<int>(weights.size())}), &out_weights));
 
     for (size_t i = 0; i < indices.size(); ++i) {
-      out_indices->vec<int32>()(i) = indices[i];
+      out_indices->vec<int32_t>()(i) = indices[i];
       out_ids->vec<int64_t>()(i) = ids[i];
       out_weights->vec<float>()(i) = weights[i];
     }

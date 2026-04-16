@@ -23,17 +23,16 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/linalg/matrix_set_diag_op.h"
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/linalg/matrix_diag_op.h"
-#include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/macros.h"
 
 namespace tensorflow {
 
@@ -73,7 +72,7 @@ class MatrixSetDiagOp : public OpKernel {
       OP_REQUIRES(
           context, diag_index.NumElements() > 0,
           errors::InvalidArgument("diag_index must have at least one element"));
-      lower_diag_index = diag_index.flat<int32>()(0);
+      lower_diag_index = diag_index.flat<int32_t>()(0);
       upper_diag_index = lower_diag_index;
       if (TensorShapeUtils::IsVector(diag_index.shape())) {
         auto diag_index_size = diag_index.dim_size(0);
@@ -83,7 +82,7 @@ class MatrixSetDiagOp : public OpKernel {
                 "diag_index must have only one or two elements, received ",
                 diag_index_size, " elements."));
         if (diag_index_size > 1) {
-          upper_diag_index = diag_index.flat<int32>()(1);
+          upper_diag_index = diag_index.flat<int32_t>()(1);
         }
       }
     }
@@ -126,6 +125,20 @@ class MatrixSetDiagOp : public OpKernel {
 
     // Check if diag size is consistent with input.
     const Eigen::Index num_diags = upper_diag_index - lower_diag_index + 1;
+
+    // Before accessing diag_shape.dim_size(input_rank - 2), we must ensure
+    // the diagonal tensor actually has that dimension. Accessing a dimension
+    // index >= rank causes a hard crash (core dump).
+    if (lower_diag_index != upper_diag_index) {
+      OP_REQUIRES(
+          context, diag_shape.dims() > input_rank - 2,
+          errors::InvalidArgument(
+              "Diagonal tensor rank must be large enough to contain a "
+              "diagonal-count dimension. Input rank: ",
+              input_rank, ", Expected diagonal rank >= ", input_rank - 1,
+              ", Received diagonal rank: ", diag_shape.dims()));
+    }
+
     OP_REQUIRES(
         context,
         lower_diag_index == upper_diag_index ||
@@ -136,11 +149,13 @@ class MatrixSetDiagOp : public OpKernel {
 
     TensorShape expected_diag_shape = input_shape;
     expected_diag_shape.RemoveLastDims(2);
-    if (num_diags > 1) expected_diag_shape.AddDim(num_diags);
+    if (num_diags > 1) {
+      OP_REQUIRES_OK(context, expected_diag_shape.AddDimWithStatus(num_diags));
+    }
     const int32_t max_diag_len =
         std::min(num_rows + std::min(upper_diag_index, 0),
                  num_cols - std::max(lower_diag_index, 0));
-    expected_diag_shape.AddDim(max_diag_len);
+    OP_REQUIRES_OK(context, expected_diag_shape.AddDimWithStatus(max_diag_len));
     OP_REQUIRES(
         context, expected_diag_shape == diag_shape,
         errors::InvalidArgument(
@@ -173,7 +188,8 @@ class MatrixSetDiagOp : public OpKernel {
   bool left_align_superdiagonal_ = true;
   bool left_align_subdiagonal_ = true;
   static constexpr int kNumV1Inputs = 2;
-  TF_DISALLOW_COPY_AND_ASSIGN(MatrixSetDiagOp);
+  MatrixSetDiagOp(const MatrixSetDiagOp&) = delete;
+  void operator=(const MatrixSetDiagOp&) = delete;
 };
 
 #define REGISTER_MATRIX_SET_DIAG(type)                                      \

@@ -15,6 +15,7 @@ limitations under the License.
 #include "tensorflow/core/tpu/kernels/tpu_compilation_cache_grpc.h"
 
 #include <functional>
+#include <memory>
 
 #include "grpcpp/impl/codegen/async_stream.h"
 #include "grpcpp/impl/codegen/async_unary_call.h"
@@ -43,8 +44,8 @@ grpc::TpuCompilationCacheService::NewStub(
     const std::shared_ptr< ::grpc::ChannelInterface>& channel,
     const ::grpc::StubOptions& options) {
   (void)options;
-  std::unique_ptr<grpc::TpuCompilationCacheService::Stub> stub(
-      new grpc::TpuCompilationCacheService::Stub(channel));
+  std::unique_ptr<grpc::TpuCompilationCacheService::Stub> stub =
+      std::make_unique<grpc::TpuCompilationCacheService::Stub>(channel);
   return stub;
 }
 
@@ -93,7 +94,7 @@ grpc::TpuCompilationCacheService::Service::Service() {
           this)));
 }
 
-grpc::TpuCompilationCacheService::Service::~Service() {}
+grpc::TpuCompilationCacheService::Service::~Service() = default;
 
 ::grpc::Status grpc::TpuCompilationCacheService::Service::GetTpuProgram(
     ::grpc::ServerContext* context, const RequestType* request,

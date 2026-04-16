@@ -16,6 +16,8 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_DEBUG_OPS_H_
 #define TENSORFLOW_CORE_KERNELS_DEBUG_OPS_H_
 
+#include <cstdint>
+#include <memory>
 #include <numeric>
 
 #include "tensorflow/core/platform/bfloat16.h"
@@ -32,11 +34,11 @@ limitations under the License.
 #include "tensorflow/core/platform/rocm.h"
 #endif
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/debug/debug_io_utils.h"
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_util.h"
-#include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/util/debug_events_writer.h"
 
@@ -50,21 +52,22 @@ class CopyOp : public OpKernel {
   explicit CopyOp(OpKernelConstruction* context) : OpKernel(context) {
     OP_REQUIRES_OK(context, context->GetAttr("tensor_name", &tensor_name_));
 
-    std::vector<string> debug_ops_spec;
+    std::vector<std::string> debug_ops_spec;
     OP_REQUIRES_OK(context,
                    context->GetAttr("debug_ops_spec", &debug_ops_spec));
-    for (const string& debug_op_spec : debug_ops_spec) {
+    for (const std::string& debug_op_spec : debug_ops_spec) {
       // Assume debug_op_spec has the format
       // <debug_op>;<debug_url>;<gated_grpc>, e.g.,
       // DebugIdentity;grpc://localhost:3333;1
-      const std::vector<string> items = str_util::Split(debug_op_spec, ";");
+      const std::vector<std::string> items =
+          str_util::Split(debug_op_spec, ";");
       OP_REQUIRES(
           context, items.size() == 3,
           errors::Internal(
               "Unexpected number of semicolons in debug_ops_spec element: ",
               debug_op_spec));
       debug_op_and_url_specs_.push_back(
-          DebugWatchAndURLSpec(strings::StrCat(tensor_name_, ":", items[0]),
+          DebugWatchAndURLSpec(absl::StrCat(tensor_name_, ":", items[0]),
                                items[1], items[2] == "1"));
     }
   }
@@ -89,10 +92,10 @@ class CopyOp : public OpKernel {
       if (off_host_input) {
         DeviceContext* device_ctxt = context->op_device_context();
         // Input is not on host: deep-copy it from GPU to the same GPU.
-        Notification done_copy;
+        absl::Notification done_copy;
         GPUUtil::CopyGPUTensorToSameGPU(
             device, device_ctxt, &src_tensor, copied_tensor,
-            [&done_copy](const Status& s) { done_copy.Notify(); });
+            [&done_copy](const absl::Status& s) { done_copy.Notify(); });
         done_copy.WaitForNotification();
       } else {
         // The input tensor is on the host (CPU): deep-copy from CPU to CPU.
@@ -111,26 +114,26 @@ class CopyOp : public OpKernel {
   bool IsExpensive() override { return false; }
 
  private:
-  string tensor_name_;
+  std::string tensor_name_;
   std::vector<DebugWatchAndURLSpec> debug_op_and_url_specs_;
 };
 
 // Base class of all debug ops.
 class BaseDebugOp : public OpKernel {
  public:
-  explicit BaseDebugOp(const string& debug_op_name,
+  explicit BaseDebugOp(const std::string& debug_op_name,
                        OpKernelConstruction* context)
       : OpKernel(context), debug_op_name_(debug_op_name) {
     OP_REQUIRES_OK(context, context->GetAttr("debug_urls", &debug_urls_));
     OP_REQUIRES_OK(context, context->GetAttr("gated_grpc", &gated_grpc_));
 
-    string device_name;
-    string tensor_name;
+    std::string device_name;
+    std::string tensor_name;
     OP_REQUIRES_OK(context, context->GetAttr("device_name", &device_name));
     OP_REQUIRES_OK(context, context->GetAttr("tensor_name", &tensor_name));
 
-    std::vector<string> name_items = str_util::Split(tensor_name, ':');
-    string node_name;
+    std::vector<std::string> name_items = str_util::Split(tensor_name, ':');
+    std::string node_name;
     int32_t output_slot = 0;
     OP_REQUIRES(context, name_items.size() == 1 || name_items.size() == 2,
                 errors::InvalidArgument("Failed to parse tensor name: \"",
@@ -138,7 +141,7 @@ class BaseDebugOp : public OpKernel {
     if (name_items.size() == 2) {
       node_name = name_items[0];
       OP_REQUIRES(
-          context, strings::safe_strto32(name_items[1], &output_slot),
+          context, absl::SimpleAtoi(name_items[1], &output_slot),
           errors::InvalidArgument("Invalid string value for output_slot: \"",
                                   name_items[1], "\""));
     } else if (name_items.size() == 1) {
@@ -177,28 +180,36 @@ class BaseDebugOp : public OpKernel {
 
   // Publish a tensor to all debug URLs of the debug op.
   // Log an error if the publishing failed.
-  Status PublishTensor(const Tensor& tensor) {
+  absl::Status PublishTensor(const Tensor& tensor, int64_t step_id = -1) {
     if (debug_urls_.empty()) {
-      return Status::OK();
+      return absl::OkStatus();
     } else {
-      Status status = DebugIO::PublishDebugTensor(*debug_watch_key_, tensor,
-                                                  Env::Default()->NowMicros(),
-                                                  debug_urls_, gated_grpc_);
+      absl::Status status = DebugIO::PublishDebugTensor(
+          *debug_watch_key_, tensor, Env::Default()->NowMicros(), debug_urls_,
+          gated_grpc_, step_id);
       if (!status.ok()) {
         LOG(ERROR) << "Debug node of watch key "
                    << debug_watch_key_->debug_node_name
                    << " failed to publish debug tensor data to all URLs "
-                   << str_util::Join(debug_urls_, ", ")
-                   << ", due to: " << status.error_message();
+                   << absl::StrJoin(debug_urls_, ", ")
+                   << ", due to: " << status.message();
       }
       return status;
     }
   }
 
+  void CompleteDebugNodeKey(const std::string& io_of_node, bool is_input,
+                            int io_index) {
+    debug_watch_key_ = std::make_unique<DebugNodeKey>(
+        debug_watch_key_->device_name, debug_watch_key_->node_name,
+        debug_watch_key_->output_slot, debug_op_name_, io_of_node, is_input,
+        io_index);
+  }
+
  private:
-  const string debug_op_name_;
+  const std::string debug_op_name_;
   std::unique_ptr<DebugNodeKey> debug_watch_key_;
-  std::vector<string> debug_urls_;
+  std::vector<std::string> debug_urls_;
   bool gated_grpc_;
 };
 
@@ -217,6 +228,36 @@ class DebugIdentityOp : public BaseDebugOp {
     }
 
     OP_REQUIRES_OK(context, PublishTensor(context->input(0)));
+    context->set_output(0, context->input(0));
+  }
+};
+
+// Identity op for debugging.
+//   Output slot 0 carries the debug signal and is always allocated on the
+//   host (CPU) as a non-Ref tensor. In the case of DebugIdentityOp,
+//   the debug signal is equal to the input tensor.
+class DebugIdentityV3Op : public BaseDebugOp {
+ public:
+  explicit DebugIdentityV3Op(OpKernelConstruction* context)
+      : BaseDebugOp("DebugIdentityV3", context) {
+    std::string io_of_node;
+    bool is_input;
+    int io_index;
+    OP_REQUIRES_OK(context, context->GetAttr("io_of_node", &io_of_node));
+    OP_REQUIRES_OK(context, context->GetAttr("is_input", &is_input));
+    OP_REQUIRES_OK(context, context->GetAttr("io_index", &io_index));
+    if (!io_of_node.empty()) {
+      CompleteDebugNodeKey(io_of_node, is_input, io_index);
+    }
+  }
+
+  void Compute(OpKernelContext* context) override {
+    if (!ApplyGrpcGating(context)) {
+      return;
+    }
+
+    OP_REQUIRES_OK(context,
+                   PublishTensor(context->input(0), context->step_id()));
     context->set_output(0, context->input(0));
   }
 };
@@ -399,9 +440,9 @@ class DebugIdentityV2Op : public OpKernel {
         output_slot_(-1),
         tensor_debug_mode_(0),
         tfdbg_run_id_() {
-    std::vector<string> debug_urls;
+    std::vector<std::string> debug_urls;
     OP_REQUIRES_OK(context, context->GetAttr("debug_urls", &debug_urls));
-    for (const string& debug_url : debug_urls) {
+    for (const std::string& debug_url : debug_urls) {
       if (absl::StartsWith(debug_url, DebugIO::kFileURLScheme)) {
         dump_roots_.emplace_back(
             debug_url.substr(strlen(DebugIO::kFileURLScheme)));
@@ -430,7 +471,7 @@ class DebugIdentityV2Op : public OpKernel {
 
   void Compute(OpKernelContext* context) override {
     const Tensor& tensor = context->input(0);
-    for (const string& dump_root : dump_roots_) {
+    for (const std::string& dump_root : dump_roots_) {
       tfdbg::DebugEventsWriter* debug_events_writer =
           tfdbg::DebugEventsWriter::GetDebugEventsWriter(
               dump_root, tfdbg_run_id_, circular_buffer_size_);
@@ -442,14 +483,14 @@ class DebugIdentityV2Op : public OpKernel {
   }
 
  private:
-  std::vector<string> dump_roots_;
-  string tfdbg_context_id_;
-  string device_name_;
-  string op_name_;
-  int32 output_slot_;
-  int32 tensor_debug_mode_;
+  std::vector<std::string> dump_roots_;
+  std::string tfdbg_context_id_;
+  std::string device_name_;
+  std::string op_name_;
+  int32_t output_slot_;
+  int32_t tensor_debug_mode_;
   int64_t circular_buffer_size_;
-  string tfdbg_run_id_;
+  std::string tfdbg_run_id_;
 };
 
 typedef Eigen::ThreadPoolDevice CPUDevice;
@@ -735,12 +776,14 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
       OP_REQUIRES_ASYNC(context, stream != nullptr,
                         errors::Internal("No GPU stream available."), done);
 
-      se::DeviceMemoryBase output_tensor_ptr(
+      stream_executor::DeviceAddressBase output_tensor_ptr(
           output_tensor->flat<Tout>().data(),
           output_tensor->flat<Tout>().size());
-      stream->ThenMemZero(&output_tensor_ptr, 2 * sizeof(Tout));
+      OP_REQUIRES_OK(context,
+                     stream->MemZero(&output_tensor_ptr, 2 * sizeof(Tout)));
       // Copy tensor_id to slot zero
-      stream->ThenMemcpy(&output_tensor_ptr, &tensor_id, sizeof(Tout));
+      OP_REQUIRES_OK(context, stream->Memcpy(&output_tensor_ptr, &tensor_id,
+                                             sizeof(Tout)));
       if (num_elem == 0) {
         done();
         return;
@@ -751,8 +794,9 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
       CurtHealthLaunch<Tin, Tout>().Run(d, input.data(), input.size(),
                                         output_tensor->flat<Tout>().data() + 1);
 
-      context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-          stream, std::move(check_cb));
+      context->device()
+          ->tensorflow_accelerator_device_info()
+          ->event_mgr->ThenExecute(stream, std::move(check_cb));
     } else if (tensor_debug_mode_ == 3) {  // CONCISE_HEALTH.
       TensorShape shape({5});
       OP_REQUIRES_OK(context,
@@ -768,12 +812,14 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
       OP_REQUIRES_ASYNC(context, stream != nullptr,
                         errors::Internal("No GPU stream available."), done);
 
-      se::DeviceMemoryBase output_tensor_ptr(
+      stream_executor::DeviceAddressBase output_tensor_ptr(
           output_tensor->flat<Tout>().data(),
           output_tensor->flat<Tout>().size());
-      stream->ThenMemset32(&output_tensor_ptr, 0, 5 * sizeof(Tout));
+      OP_REQUIRES_OK(context,
+                     stream->Memset32(&output_tensor_ptr, 0, 5 * sizeof(Tout)));
       const Tout static_output[] = {tensor_id, num_elem};
-      stream->ThenMemcpy(&output_tensor_ptr, &static_output, 2 * sizeof(Tout));
+      OP_REQUIRES_OK(context, stream->Memcpy(&output_tensor_ptr, &static_output,
+                                             2 * sizeof(Tout)));
       if (num_elem == 0) {
         done();
         return;
@@ -784,8 +830,9 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
           d, input.data(), input.size(),
           output_tensor->flat<Tout>().data() + 2);
 
-      context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-          stream, std::move(check_cb));
+      context->device()
+          ->tensorflow_accelerator_device_info()
+          ->event_mgr->ThenExecute(stream, std::move(check_cb));
     } else if (tensor_debug_mode_ == 4) {  // FULL HEALTH
       TensorShape shape({11});
       OP_REQUIRES_OK(context,
@@ -801,17 +848,19 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
                             "FULL_HEALTH."),
                         done);
 
-      se::DeviceMemoryBase output_tensor_ptr(
+      stream_executor::DeviceAddressBase output_tensor_ptr(
           output_tensor->flat<Tout>().data(),
           output_tensor->flat<Tout>().size());
-      stream->ThenMemset32(&output_tensor_ptr, 0, 11 * sizeof(Tout));
+      OP_REQUIRES_OK(
+          context, stream->Memset32(&output_tensor_ptr, 0, 11 * sizeof(Tout)));
 
       int num_dims = tensor.dims();
       const Tout static_output[] = {tensor_id,
                                     -1.0,  // TODO(144919262): Device ID
                                     static_cast<Tout>(tensor.dtype()),
                                     static_cast<Tout>(num_dims), num_elem};
-      stream->ThenMemcpy(&output_tensor_ptr, &static_output, 5 * sizeof(Tout));
+      OP_REQUIRES_OK(context, stream->Memcpy(&output_tensor_ptr, &static_output,
+                                             5 * sizeof(Tout)));
       if (num_elem == 0) {
         done();
         return;
@@ -822,8 +871,9 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
       FullHealthLaunch<Tin, Tout>().Run(d, input.data(), input.size(),
                                         output_tensor->flat<Tout>().data() + 5);
 
-      context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-          stream, std::move(check_cb));
+      context->device()
+          ->tensorflow_accelerator_device_info()
+          ->event_mgr->ThenExecute(stream, std::move(check_cb));
     } else if (tensor_debug_mode_ == 5) {  // SHAPE
       TensorShape shape({10});
       OP_REQUIRES_OK(context,
@@ -833,7 +883,7 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
       OP_REQUIRES_ASYNC(context, stream != nullptr,
                         errors::Internal("No GPU stream available."), done);
 
-      se::DeviceMemoryBase output_tensor_ptr(
+      stream_executor::DeviceAddressBase output_tensor_ptr(
           output_tensor->flat<Tout>().data(),
           output_tensor->flat<Tout>().size());
 
@@ -854,9 +904,11 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
         static_output[dim_idx++] = static_cast<Tout>(tensor.dim_size(i));
       }
       // Write to device stream
-      stream->ThenMemcpy(&output_tensor_ptr, &static_output, sizeof(Tout) * 10);
-      context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-          stream, std::move(check_cb));
+      OP_REQUIRES_OK(context, stream->Memcpy(&output_tensor_ptr, &static_output,
+                                             sizeof(Tout) * 10));
+      context->device()
+          ->tensorflow_accelerator_device_info()
+          ->event_mgr->ThenExecute(stream, std::move(check_cb));
     } else if (tensor_debug_mode_ == 8) {  // REDUCE_INF_NAN_THREE_SLOTS.
       TensorShape shape({3});
       OP_REQUIRES_OK(context,
@@ -866,11 +918,13 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
       OP_REQUIRES_ASYNC(context, stream != nullptr,
                         errors::Internal("No GPU stream available."), done);
 
-      se::DeviceMemoryBase output_tensor_ptr(
+      stream_executor::DeviceAddressBase output_tensor_ptr(
           output_tensor->flat<Tout>().data(),
           output_tensor->flat<Tout>().size());
-      stream->ThenMemset32(&output_tensor_ptr, 0,
-                           output_tensor->flat<Tout>().size() * sizeof(Tout));
+      OP_REQUIRES_OK(
+          context,
+          stream->Memset32(&output_tensor_ptr, 0,
+                           output_tensor->flat<Tout>().size() * sizeof(Tout)));
       if (num_elem == 0) {
         done();
         return;
@@ -881,8 +935,9 @@ class DebugNumericSummaryV2Op<GPUDevice, Tin, Tout> : public AsyncOpKernel {
       ReduceInfNanThreeSlotsLaunch<Tin, Tout>().Run(
           d, input.data(), input.size(), output_tensor->flat<Tout>().data());
 
-      context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-          stream, std::move(check_cb));
+      context->device()
+          ->tensorflow_accelerator_device_info()
+          ->event_mgr->ThenExecute(stream, std::move(check_cb));
     } else {
       // TODO(cais): Implement other tensor debug modes in debug_event.proto.
       context->SetStatus(errors::Unimplemented(

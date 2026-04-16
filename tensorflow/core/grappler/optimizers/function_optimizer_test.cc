@@ -15,10 +15,17 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/optimizers/function_optimizer.h"
 
+#include <string>
+#include <vector>
+
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "absl/algorithm/container.h"
 #include "tensorflow/cc/ops/functional_ops.h"
 #include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/function_testlib.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/op_types.h"
@@ -54,8 +61,8 @@ TEST_F(FunctionOptimizerTest, InlineFunction_SimpleFunction) {
   GraphDef output;
   TF_EXPECT_OK(optimizer.Optimize(nullptr, item, &output));
 
-  const string arg0 = "Func/y/input/_0";
-  const string ret0 = "Func/y/output/_1";
+  const std::string arg0 = "Func/y/input/_0";
+  const std::string ret0 = "Func/y/output/_1";
 
   const Tensor kTwo = test::AsScalar<int64_t>(2);
   GraphDef expected = test::function::GDef(
@@ -121,7 +128,7 @@ TEST_F(FunctionOptimizerTest, InlineFunction_FixedTypeFunction) {
       });
 
   GraphDef output;
-  Status status = optimizer.Optimize(nullptr, item, &output);
+  absl::Status status = optimizer.Optimize(nullptr, item, &output);
   TF_EXPECT_OK(status);
 
   // Calls to XTimesTwo were removed from the graph.
@@ -471,7 +478,7 @@ TEST_F(FunctionOptimizerTest, InlineSymbolicGradientNoInlineFunc) {
   *item.graph.mutable_library()->add_function() = func;
 
   GraphDef output;
-  Status status = optimizer.Optimize(nullptr, item, &output);
+  absl::Status status = optimizer.Optimize(nullptr, item, &output);
   // The optimizer should succeed but the graphs should be the same.
   TF_EXPECT_OK(status);
   CompareGraphs(item.graph, output);
@@ -507,9 +514,9 @@ TEST_F(FunctionOptimizerTest, InlineIndirectFunctionSimpleFunction) {
   item.feed.emplace_back("a", pi);
   item.feed.emplace_back("b", pi);
 
-  const string input_x = "Func/c/input/_0";
-  const string input_y = "Func/c/input/_1";
-  const string output_z = "Func/c/output/_2";
+  const std::string input_x = "Func/c/input/_0";
+  const std::string input_y = "Func/c/input/_1";
+  const std::string output_z = "Func/c/output/_2";
 
   // If device set is empty, inlined function body must not be placed.
   {
@@ -747,8 +754,8 @@ TEST_F(FunctionOptimizerTest, InlineIndirectFunctionWithDevicePlacement) {
   (*mul_func.mutable_node_def())[0].set_device("/device:CPU:1");
 
   // We need fully defined device names to run the placer for inlined function.
-  const string cpu0 = "/job:work/replica:1/task:1/device:CPU:0";
-  const string cpu1 = "/job:work/replica:1/task:1/device:CPU:1";
+  const std::string cpu0 = "/job:work/replica:1/task:1/device:CPU:0";
+  const std::string cpu1 = "/job:work/replica:1/task:1/device:CPU:1";
 
   // Build a graph to compute c = MyMul(a, b)
   GrapplerItem item;
@@ -769,9 +776,9 @@ TEST_F(FunctionOptimizerTest, InlineIndirectFunctionWithDevicePlacement) {
   GraphDef optimized_graph;
   TF_EXPECT_OK(optimizer.Optimize(nullptr, item, &optimized_graph));
 
-  const string input_x = "Func/c/input/_0";
-  const string input_y = "Func/c/input/_1";
-  const string output_z = "Func/c/output/_2";
+  const std::string input_x = "Func/c/input/_0";
+  const std::string input_y = "Func/c/input/_1";
+  const std::string output_z = "Func/c/output/_2";
 
   GraphDef expected = test::function::GDef(
       {NDef("a", "Placeholder", {}, {{"dtype", DT_FLOAT}}, cpu0),
@@ -807,8 +814,8 @@ TEST_F(FunctionOptimizerTest,
   (*mul_func.mutable_node_def())[0].set_device("/device:CPU:1");
 
   // We need fully defined device names to run the placer for inlined function.
-  const string cpu0 = "/job:work/replica:1/task:1/device:CPU:0";
-  const string cpu1 = "/job:work/replica:1/task:1/device:CPU:1";
+  const std::string cpu0 = "/job:work/replica:1/task:1/device:CPU:0";
+  const std::string cpu1 = "/job:work/replica:1/task:1/device:CPU:1";
 
   // Build a graph to compute c = MyMul(a, b)
   GrapplerItem item;
@@ -833,14 +840,13 @@ TEST_F(FunctionOptimizerTest,
 
   GraphDef optimized_graph;
   TF_EXPECT_OK(optimizer.Optimize(nullptr, item, &optimized_graph));
-  LOG(ERROR) << "IG: " << optimized_graph.DebugString();
 
-  const string input_c_x = "Func/c/input/_0";
-  const string input_c_y = "Func/c/input/_1";
-  const string output_c_z = "Func/c/output/_2";
-  const string input_d_x = "Func/d/input/_3";
-  const string input_d_y = "Func/d/input/_4";
-  const string output_d_z = "Func/d/output/_5";
+  const std::string input_c_x = "Func/c/input/_0";
+  const std::string input_c_y = "Func/c/input/_1";
+  const std::string output_c_z = "Func/c/output/_2";
+  const std::string input_d_x = "Func/d/input/_3";
+  const std::string input_d_y = "Func/d/input/_4";
+  const std::string output_d_z = "Func/d/output/_5";
 
   GraphDef expected = test::function::GDef(
       {NDef("a", "Placeholder", {}, {{"dtype", DT_FLOAT}}, cpu0),
@@ -1309,7 +1315,7 @@ TEST_F(FunctionOptimizerTest, InlineIndirectFunctionWithFunctionalControlFlow) {
   GraphDef optimized_graph;
   TF_EXPECT_OK(optimizer.Optimize(nullptr, item, &optimized_graph));
 
-  const auto count_nodes_with_op = [&](const string& op) {
+  const auto count_nodes_with_op = [&](const std::string& op) {
     return absl::c_count_if(optimized_graph.node(), [&](const NodeDef& node) {
       return node.op() == op;
     });
@@ -1329,7 +1335,7 @@ TEST_F(FunctionOptimizerTest, InlineIndirectFunctionWithFunctionalControlFlow) {
   Tensor three = test::AsScalar<float>(3.0);
 
   const auto feed_args = [&](bool is_add) {
-    std::vector<std::pair<string, Tensor>> feed;
+    std::vector<std::pair<std::string, Tensor>> feed;
     feed.emplace_back("a", one);
     feed.emplace_back("b", two);
     feed.emplace_back("is_add", test::AsScalar<bool>(is_add));
@@ -1372,7 +1378,7 @@ TEST_F(FunctionOptimizerTest, InlineIndirectFunctionDontLowerControlFlow) {
   GraphDef optimized_graph;
   TF_EXPECT_OK(optimizer.Optimize(nullptr, item, &optimized_graph));
 
-  const auto count_nodes_with_op = [&](const string& op) {
+  const auto count_nodes_with_op = [&](const std::string& op) {
     return absl::c_count_if(optimized_graph.node(), [&](const NodeDef& node) {
       return node.op() == op;
     });
@@ -1392,7 +1398,7 @@ TEST_F(FunctionOptimizerTest, InlineIndirectFunctionDontLowerControlFlow) {
   Tensor three = test::AsScalar<float>(3.0);
 
   const auto feed_args = [&](bool is_add) {
-    std::vector<std::pair<string, Tensor>> feed;
+    std::vector<std::pair<std::string, Tensor>> feed;
     feed.emplace_back("a", one);
     feed.emplace_back("b", two);
     feed.emplace_back("is_add", test::AsScalar<bool>(is_add));
@@ -1773,8 +1779,8 @@ TEST_F(FunctionOptimizerTest, SpecializeFunction_OncePerUniqueContext) {
       EXPECT_EQ("MyMul_specialized_for_mul_4_at_tf_graph", node.op());
       ASSERT_EQ(3, node.input_size());
       EXPECT_EQ("yf", node.input(0));
-      gtl::FlatSet<string> expected_ctrl = {"^init", "^xf"};
-      gtl::FlatSet<string> actual_ctrl = {node.input(1), node.input(2)};
+      gtl::FlatSet<std::string> expected_ctrl = {"^init", "^xf"};
+      gtl::FlatSet<std::string> actual_ctrl = {node.input(1), node.input(2)};
       EXPECT_EQ(expected_ctrl, actual_ctrl);
 
     } else if (node.name() == "mul_6" && ++count) {
@@ -1788,7 +1794,7 @@ TEST_F(FunctionOptimizerTest, SpecializeFunction_OncePerUniqueContext) {
 
   // And that graph evaluation yields the same result.
   Tensor pi = test::AsScalar<float>(3.14f);
-  Tensor four = test::AsScalar<int32>(4);
+  Tensor four = test::AsScalar<int32_t>(4);
   item.feed = {{"xf", pi}, {"yf", pi}, {"xi", four}, {"yi", four}};
 
   auto tensors_expected = EvaluateFetchNodes(item);
@@ -1797,7 +1803,7 @@ TEST_F(FunctionOptimizerTest, SpecializeFunction_OncePerUniqueContext) {
 
   test::ExpectTensorEqual<float>(tensors_expected[0], tensors[0]);
   test::ExpectTensorEqual<float>(tensors_expected[1], tensors[1]);
-  test::ExpectTensorEqual<int32>(tensors_expected[2], tensors[2]);
+  test::ExpectTensorEqual<int32_t>(tensors_expected[2], tensors[2]);
   test::ExpectTensorEqual<float>(tensors_expected[3], tensors[3]);
   test::ExpectTensorEqual<float>(tensors_expected[4], tensors[4]);
   test::ExpectTensorEqual<float>(tensors_expected[5], tensors[5]);
@@ -2089,12 +2095,60 @@ TEST_F(FunctionOptimizerTest, PruningUselessLibraryFunctions) {
           test::function::XTimes16(),
       });
   GraphDef output;
-  Status status = optimizer.Optimize(nullptr, item, &output);
+  absl::Status status = optimizer.Optimize(nullptr, item, &output);
   TF_EXPECT_OK(status);
 
   ASSERT_EQ(output.library().function().size(), 1);
   EXPECT_EQ(output.library().function(0).signature().name(),
             "XTimesTwo_specialized_for_y_at_test_graph");
+}
+
+TEST_F(FunctionOptimizerTest, PreserveSaverDefFunctions) {
+  using test::function::NDef;
+  using FDH = FunctionDefHelper;
+  FunctionOptimizer optimizer(RewriterConfig::DEFAULT, true);
+  auto func = test::function::XTimesTwo();
+  (*func.mutable_attr())["_noinline"].set_b(true);
+  GrapplerItem item;
+  item.id = "test_graph";
+  item.graph = test::function::GDef(
+      {
+          NDef("x", "Placeholder", {}, {{"dtype", DT_FLOAT}}, "/device:CPU:0"),
+          NDef("y", "XTimesTwo", {"x"}, {{"T", DT_FLOAT}}, "/device:CPU:0"),
+          NDef("z", "Identity", {"y"}, {{"T", DT_FLOAT}}, "/device:CPU:0"),
+          NDef("Restore", "StatefulPartitionedCall", {},
+               {{"Tin", {}},
+                {"Tout", {}},
+                {"f", FDH::FunctionRef("RestoreFn", {})}},
+               "/device:CPU:0"),
+          NDef("Save", "StatefulPartitionedCall", {},
+               {{"Tin", {}},
+                {"Tout", {}},
+                {"f", FDH::FunctionRef("SaveFn", {})}},
+               "/device:CPU:0"),
+      },
+      // FunctionLib
+      {
+          func,
+          test::function::XTimesTwoInt32(),
+          test::function::XTimes16(),
+          FDH::Create("RestoreFn", {}, {}, {}, {}, {}),
+          FDH::Create("SaveFn", {}, {}, {}, {}, {}),
+      });
+  item.restore_op = "Restore";
+  item.save_op = "Save";
+  GraphDef output;
+  absl::Status status = optimizer.Optimize(nullptr, item, &output);
+  TF_EXPECT_OK(status);
+
+  ASSERT_EQ(output.library().function().size(), 3);
+  std::vector<std::string> signature_names;
+  for (const auto& function : output.library().function()) {
+    signature_names.push_back(function.signature().name());
+  }
+  EXPECT_THAT(signature_names, ::testing::UnorderedElementsAre(
+                                   "XTimesTwo_specialized_for_y_at_test_graph",
+                                   "RestoreFn", "SaveFn"));
 }
 
 }  // namespace grappler

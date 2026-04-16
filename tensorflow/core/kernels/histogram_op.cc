@@ -18,6 +18,7 @@ limitations under the License.
 #define EIGEN_USE_THREADS
 
 #include "tensorflow/core/kernels/histogram_op.h"
+
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/types.h"
@@ -33,43 +34,61 @@ namespace functor {
 
 template <typename T, typename Tout>
 struct HistogramFixedWidthFunctor<CPUDevice, T, Tout> {
-  static Status Compute(OpKernelContext* context,
-                        const typename TTypes<T, 1>::ConstTensor& values,
-                        const typename TTypes<T, 1>::ConstTensor& value_range,
-                        int32_t nbins, typename TTypes<Tout, 1>::Tensor& out) {
+  static absl::Status Compute(
+      OpKernelContext* context,
+      const typename TTypes<T, 1>::ConstTensor& values,
+      const typename TTypes<T, 1>::ConstTensor& value_range, int32_t nbins,
+      typename TTypes<Tout, 1>::Tensor& out) {
     const CPUDevice& d = context->eigen_device<CPUDevice>();
 
+    if (nbins == 1) {
+      out(0) = static_cast<Tout>(values.size());
+      return absl::OkStatus();
+    }
+
     Tensor index_to_bin_tensor;
-
     TF_RETURN_IF_ERROR(context->forward_input_or_allocate_temp(
-        {0}, DataTypeToEnum<int32>::value, TensorShape({values.size()}),
+        {0}, DataTypeToEnum<int32_t>::value, TensorShape({values.size()}),
         &index_to_bin_tensor));
-    auto index_to_bin = index_to_bin_tensor.flat<int32>();
+    auto index_to_bin = index_to_bin_tensor.flat<int32_t>();
 
-    const double step = static_cast<double>(value_range(1) - value_range(0)) /
-                        static_cast<double>(nbins);
+    // Avoid overflow in step computation.
+    const double step =
+        static_cast<double>(value_range(1)) / static_cast<double>(nbins) -
+        static_cast<double>(value_range(0)) / static_cast<double>(nbins);
     const double nbins_minus_1 = static_cast<double>(nbins - 1);
+
+    // We cannot handle NANs in the algorithm below (due to the cast to int32)
+    const Eigen::Tensor<int32_t, 1, 1> nans_tensor =
+        values.isnan().template cast<int32_t>();
+    const Eigen::Tensor<int32_t, 0, 1> reduced_tensor = nans_tensor.sum();
+    const int num_nans = reduced_tensor(0);
+    if (num_nans > 0) {
+      return errors::InvalidArgument("Histogram values must not contain NaN");
+    }
 
     // The calculation is done by finding the slot of each value in `values`.
     // With [a, b]:
     //   step = (b - a) / nbins
     //   (x - a) / step
     // , then the entries are mapped to output.
-
-    // Bug fix: Switch the order of cwiseMin and int32-casting to avoid
-    // producing a negative index when casting an big int64 number to int32
-    index_to_bin.device(d) =
-        ((values.cwiseMax(value_range(0)) - values.constant(value_range(0)))
-             .template cast<double>() /
-         step)
-            .cwiseMin(nbins_minus_1)
-            .template cast<int32>();
+    //
+    // Bound range and cast to double _before_ subtracting the lower-bound to
+    // avoid overflow.  Otherwise the difference may not fit within the type
+    // (e.g. int32).
+    index_to_bin.device(d) = ((values.cwiseMax(value_range(0))
+                                   .cwiseMin(value_range(1))
+                                   .template cast<double>() -
+                               static_cast<double>(value_range(0))) /
+                              step)
+                                 .cwiseMin(nbins_minus_1)
+                                 .template cast<int32_t>();
 
     out.setZero();
     for (int32_t i = 0; i < index_to_bin.size(); i++) {
       out(index_to_bin(i)) += Tout(1);
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -95,15 +114,15 @@ class HistogramFixedWidthOp : public OpKernel {
 
     const auto values = values_tensor.flat<T>();
     const auto value_range = value_range_tensor.flat<T>();
-    const auto nbins = nbins_tensor.scalar<int32>()();
+    const auto nbins = nbins_tensor.scalar<int32_t>()();
 
     OP_REQUIRES(
-        ctx, (value_range(0) < value_range(1)),
+        ctx, value_range(0) < value_range(1),
         errors::InvalidArgument("value_range should satisfy value_range[0] < "
                                 "value_range[1], but got '[",
                                 value_range(0), ", ", value_range(1), "]'"));
     OP_REQUIRES(
-        ctx, (nbins > 0),
+        ctx, nbins > 0,
         errors::InvalidArgument("nbins should be a positive number, but got '",
                                 nbins, "'"));
 

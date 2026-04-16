@@ -1,8 +1,10 @@
 # Cloud TPU Client.
 
-load("//tensorflow:tensorflow.bzl", "tf_py_test")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.default.bzl", "tf_py_strict_test")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         "//tensorflow:internal",
     ],
@@ -15,10 +17,8 @@ py_library(
         "client.py",
         "version.py",
     ],
-    srcs_version = "PY3",
-    deps = [
-        "@six_archive//:six",
-    ],
+    strict_deps = True,
+    deps = ["@absl_py//absl/flags"],
 )
 
 py_library(
@@ -26,29 +26,19 @@ py_library(
     srcs = [
         "__init__.py",
     ],
-    srcs_version = "PY3",
-    deps = [
-        ":client",
-        "@six_archive//:six",
-    ],
+    strict_deps = True,
+    deps = [":client"],
 )
 
-tf_py_test(
+tf_py_strict_test(
     name = "client_py_test",
     size = "small",
     srcs = ["client_test.py"],
     grpc_enabled = True,
     main = "client_test.py",
-    python_version = "PY3",
-    tags = [
-        "no_oss_py2",
-    ],
     deps = [
         ":client",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:training_server_lib",
+        "//tensorflow/python/platform:client_testlib",
+        "@absl_py//absl/flags",
     ],
 )

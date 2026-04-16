@@ -33,9 +33,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/gpu/gpu_event_mgr.h"
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-#if GOOGLE_CUDA
-#include "tensorflow/stream_executor/cuda/cuda_activation.h"
-#elif TENSORFLOW_USE_ROCM
+#if TENSORFLOW_USE_ROCM
 #include "tensorflow/core/platform/rocm.h"
 #endif
 namespace tensorflow {
@@ -99,7 +97,7 @@ class CheckNumericsOp<CPUDevice, T> : public OpKernel {
         data, data + size, 0,
         [this](const int x, const T& y) { return checkFloatingElement(x, y); });
     if (fp_props != 0) {
-      const string& status = getErrorString(fp_props);
+      const std::string& status = getErrorString(fp_props);
       if (!status.empty()) {
         context->SetStatus(errors::InvalidArgument(message_, " : Tensor had ",
                                                    status, " values"));
@@ -122,8 +120,8 @@ class CheckNumericsOp<CPUDevice, T> : public OpKernel {
     return result;
   }
 
-  virtual const string getErrorString(const int fp_props) {
-    string status;
+  virtual const std::string getErrorString(const int fp_props) {
+    std::string status;
     if ((fp_props & kInfBit) && (fp_props & kNaNBit)) {
       status = "Inf and NaN";
     } else {
@@ -138,7 +136,7 @@ class CheckNumericsOp<CPUDevice, T> : public OpKernel {
   }
 
  private:
-  string message_;
+  std::string message_;
 };
 
 template <typename Device, typename T>
@@ -167,8 +165,8 @@ class CheckNumericsV2Op<CPUDevice, T> : public CheckNumericsOp<CPUDevice, T> {
     return result;
   }
 
-  const string getErrorString(const int fp_props) override {
-    std::vector<string> anomalies;
+  const std::string getErrorString(const int fp_props) override {
+    std::vector<std::string> anomalies;
     if (fp_props & kNegativeInfBit) {
       anomalies.push_back("-Inf");
     }
@@ -182,7 +180,7 @@ class CheckNumericsV2Op<CPUDevice, T> : public CheckNumericsOp<CPUDevice, T> {
       return strings::StrCat(anomalies[0], ", ", anomalies[1], ", and ",
                              anomalies[2]);
     } else if (anomalies.size() == 2) {
-      return strings::StrCat(anomalies[0], " and ", anomalies[1]);
+      return absl::StrCat(anomalies[0], " and ", anomalies[1]);
     } else {
       return anomalies[0];
     }
@@ -223,11 +221,13 @@ class CheckNumericsOp<GPUDevice, T> : public AsyncOpKernel {
     OP_REQUIRES_ASYNC(context, stream != nullptr,
                       errors::Internal("No GPU stream available."), done);
 
-    se::DeviceMemoryBase abnormal_detected_ptr(
+    stream_executor::DeviceAddressBase abnormal_detected_ptr(
         abnormal_detected.flat<int>().data(),
         abnormal_detected.flat<int>().size());
-    stream->ThenMemset32(&abnormal_detected_ptr, 0,
-                         abnormal_detected.flat<int>().size() * sizeof(int));
+    OP_REQUIRES_OK(
+        context,
+        stream->Memset32(&abnormal_detected_ptr, 0,
+                         abnormal_detected.flat<int>().size() * sizeof(int)));
 
     // Call the GPU kernels for the numerical checks
     const Device& d = context->eigen_device<Device>();
@@ -244,35 +244,35 @@ class CheckNumericsOp<GPUDevice, T> : public AsyncOpKernel {
         context->allocate_temp(DT_INT32, TensorShape({abnormal_detected_size}),
                                &abnormal_detected_host, attr),
         done);
-    OP_REQUIRES_ASYNC(
-        context,
-        stream
-            ->ThenMemcpy(abnormal_detected_host.flat<int>().data(),
-                         abnormal_detected_ptr,
-                         abnormal_detected_size * sizeof(int))
-            .ok(),
-        errors::Internal("GPU memcpy from device to host failed"), done);
+    OP_REQUIRES_ASYNC(context,
+                      stream
+                          ->Memcpy(abnormal_detected_host.flat<int>().data(),
+                                   abnormal_detected_ptr,
+                                   abnormal_detected_size * sizeof(int))
+                          .ok(),
+                      errors::Internal("GPU memcpy from device to host failed"),
+                      done);
 
     // We have observed crashes on some network stacks when not holding
     // this tensor reference.
     TensorReference abnormal_detected_ref(abnormal_detected);
     auto check_cb = [this, stream, abnormal_detected_ref,
                      abnormal_detected_host, context, done]() {
-#if GOOGLE_CUDA
-      se::cuda::ScopedActivateExecutorContext scoped_activation{
-          stream->parent()};
-#elif TENSORFLOW_USE_ROCM
-      se::rocm::ScopedActivateExecutorContext scoped_activation{
-          stream->parent()};
-#endif
-      TTypes<const int>::Vec abnormal_detected_host_flat =
-          abnormal_detected_host.flat<int>();
-      abnormal_detected_ref.Unref();
-      checkForAnomalies(context, abnormal_detected_host_flat);
+      {
+        std::unique_ptr<se::ActivateContext> scoped_activation =
+            stream->parent()->Activate();
+        TTypes<const int>::Vec abnormal_detected_host_flat =
+            abnormal_detected_host.flat<int>();
+        abnormal_detected_ref.Unref();
+        checkForAnomalies(context, abnormal_detected_host_flat);
+      }  // Release ActivateContext to prevent deadlock when done
+         // inlines another Op kernel, which may assume the original cuda
+         // Context.
       done();
     };
-    context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-        stream, std::move(check_cb));
+    context->device()
+        ->tensorflow_accelerator_device_info()
+        ->event_mgr->ThenExecute(stream, std::move(check_cb));
   }
 
  protected:
@@ -292,7 +292,7 @@ class CheckNumericsOp<GPUDevice, T> : public AsyncOpKernel {
       LOG(ERROR) << "abnormal_detected_host @" << abnormality_indicators.data()
                  << " = {" << is_nan << ", " << is_inf << "} " << message_;
 
-      string anomalies;
+      std::string anomalies;
       if (is_nan && is_inf) {
         anomalies = "Inf and NaN";
       } else if (is_nan) {
@@ -305,7 +305,7 @@ class CheckNumericsOp<GPUDevice, T> : public AsyncOpKernel {
     }
   }
 
-  string message_;
+  std::string message_;
 };
 
 template <typename T>
@@ -329,7 +329,7 @@ class CheckNumericsV2Op<GPUDevice, T> : public CheckNumericsOp<GPUDevice, T> {
     const int is_negative_inf = abnormality_indicators(1);
     const int is_positive_inf = abnormality_indicators(2);
     if (is_negative_inf || is_positive_inf || is_nan) {
-      std::vector<string> anomalies;
+      std::vector<std::string> anomalies;
       if (is_negative_inf) {
         anomalies.push_back("-Inf");
       }
@@ -339,12 +339,12 @@ class CheckNumericsV2Op<GPUDevice, T> : public CheckNumericsOp<GPUDevice, T> {
       if (is_nan) {
         anomalies.push_back("NaN");
       }
-      string all_anomalies;
+      std::string all_anomalies;
       if (anomalies.size() == 3) {
         all_anomalies = strings::StrCat(anomalies[0], ", ", anomalies[1],
                                         ", and ", anomalies[2]);
       } else if (anomalies.size() == 2) {
-        all_anomalies = strings::StrCat(anomalies[0], " and ", anomalies[1]);
+        all_anomalies = absl::StrCat(anomalies[0], " and ", anomalies[1]);
       } else {
         all_anomalies = anomalies[0];
       }

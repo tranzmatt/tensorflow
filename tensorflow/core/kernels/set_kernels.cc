@@ -16,7 +16,7 @@ limitations under the License.
 // Ops for operating with sets. They are not checked in
 // to TensorFlow because we would first like to demonstrate successful
 // end-to-end use of these ops in eval and polish the api a bit like taking two
-// SparseTensor rather than on edense and one sparse.
+// SparseTensor rather than one dense and one sparse.
 
 #define EIGEN_USE_THREADS
 
@@ -28,7 +28,8 @@ limitations under the License.
 
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_set.h"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "absl/strings/ascii.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -36,6 +37,7 @@ limitations under the License.
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/util/sparse/sparse_tensor.h"
 
 namespace tensorflow {
@@ -46,45 +48,54 @@ using VarDimArray = sparse::SparseTensor::VarDimArray;
 // Validate rank >= 2.
 void CheckRankAtLeast2(OpKernelContext* ctx, const TensorShape& shape) {
   const auto rank = shape.dims();
-  OP_REQUIRES(ctx, rank >= 2,
-              errors::InvalidArgument("Invalid rank ", rank, "."));
+  OP_REQUIRES(
+      ctx, rank >= 2,
+      absl::InvalidArgumentError(absl::StrCat("Invalid rank ", rank, ".")));
 }
 
 // Return group shape, which is the 1st n-1 dimensions of shape.
-Status GroupShape(const VarDimArray& input_shape, ShapeArray* grouped_shape) {
+absl::Status GroupShape(const VarDimArray& input_shape,
+                        ShapeArray* grouped_shape) {
   if (input_shape.size() < 2) {
     // TODO(irving): Why can't 2 be 1 here?
-    return errors::InvalidArgument("Shape [", absl::StrJoin(input_shape, ","),
-                                   "] has rank ", input_shape.size(), " < 2");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Shape [", absl::StrJoin(input_shape, ","), "] has rank ",
+                     input_shape.size(), " < 2"));
   }
   // grouped_shape is input_shape[:-1]
   *grouped_shape = ShapeArray(input_shape.begin(), input_shape.end() - 1);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Build `SparseTensor` from indices, values, and shape in inputs
 // [base_index, base_index + 3), and validate its rank and indices.
-Status SparseTensorFromContext(OpKernelContext* ctx, const int32_t base_index,
-                               const bool validate_indices,
-                               sparse::SparseTensor* tensor) {
+absl::Status SparseTensorFromContext(OpKernelContext* ctx,
+                                     const int32_t base_index,
+                                     const bool validate_indices,
+                                     sparse::SparseTensor* tensor) {
   // Assume row-major order.
-  const TensorShape shape =
-      TensorShape(ctx->input(base_index + 2).vec<int64_t>());
+  TensorShape shape;
+  const Tensor& shape_tensor = ctx->input(base_index + 2);
+  if (shape_tensor.dims() != 1) {
+    return absl::InvalidArgumentError("Shape must be a 1D tensor.");
+  }
+  TF_RETURN_IF_ERROR(
+      TensorShape::BuildTensorShape(shape_tensor.vec<int64_t>(), &shape));
   CheckRankAtLeast2(ctx, shape);
   std::vector<int64_t> order(shape.dims());
   std::iota(order.begin(), order.end(), 0);
 
-  Status status = sparse::SparseTensor::Create(
+  absl::Status status = sparse::SparseTensor::Create(
       ctx->input(base_index), ctx->input(base_index + 1), shape, order, tensor);
 
   if (!validate_indices || !status.ok()) return status;
   return tensor->IndicesValid();
 }
 
-// TODO(ptucker): CheckGroup is just a sanity check on the result of
+// TODO(ptucker): CheckGroup is just a redundant check on the result of
 // SparseTensor.group, consider removing.
 // `sparse_tensor_shape` is the shape of the `SparseTensor` from which group
-// was created, and is used to sanity check the indices in `group'.
+// was created, and is used to validate the indices in `group'.
 template <typename T>
 void CheckGroup(OpKernelContext* ctx, const sparse::Group& group,
                 const VarDimArray& sparse_tensor_shape) {
@@ -93,7 +104,7 @@ void CheckGroup(OpKernelContext* ctx, const sparse::Group& group,
 
   // Sanity check: group is non-empty, and indices and values are same size.
   const auto num_values = values.dimension(0);
-  OP_REQUIRES(ctx, indices.size() > 0, errors::Internal("Empty group."));
+  OP_REQUIRES(ctx, indices.size() > 0, absl::InternalError("Empty group."));
   OP_REQUIRES(
       ctx, indices.dimension(0) == num_values,
       errors::Internal("shape[0] of group indices ", indices.dimension(0),
@@ -103,18 +114,19 @@ void CheckGroup(OpKernelContext* ctx, const sparse::Group& group,
   const auto group_rank = indices.dimension(1);
   const auto expected_rank = sparse_tensor_shape.size();
   OP_REQUIRES(ctx, expected_rank == group_rank,
-              errors::Internal("Rank expected ", expected_rank, ", got ",
-                               group_rank, "."));
+              absl::InternalError(absl::StrCat("Rank expected ", expected_rank,
+                                               ", got ", group_rank, ".")));
   for (int32_t j = 0; j < expected_rank; ++j) {
     const auto dim_size = sparse_tensor_shape[j];
-    OP_REQUIRES(
-        ctx, dim_size > 0,
-        errors::Internal("Invalid dim_size[", j, "] = ", dim_size, "."));
+    OP_REQUIRES(ctx, dim_size > 0,
+                absl::InternalError(absl::StrCat("Invalid dim_size[", j,
+                                                 "] = ", dim_size, ".")));
     for (int64_t i = 0; i < num_values; ++i) {
       const auto index = indices(i, j);
       OP_REQUIRES(ctx, dim_size > index,
-                  errors::Internal("indices[", i, ", ", j, "] expected < ",
-                                   dim_size, ", got ", index, "."));
+                  absl::InternalError(absl::StrCat("indices[", i, ", ", j,
+                                                   "] expected < ", dim_size,
+                                                   ", got ", index, ".")));
     }
   }
 }
@@ -210,10 +222,11 @@ void PopulateFromDenseGroup(OpKernelContext* ctx, const Tensor& input_tensor,
                             const VarDimArray& input_strides,
                             const std::vector<int64_t>& group_indices,
                             absl::flat_hash_set<T>* result) {
-  OP_REQUIRES(ctx, group_indices.size() == input_strides.size() - 1,
-              errors::Internal("group_indices.size ", group_indices.size(),
-                               ", !=  input_strides.size-1 ",
-                               input_strides.size() - 1, "."));
+  OP_REQUIRES(
+      ctx, group_indices.size() == input_strides.size() - 1,
+      absl::InternalError(absl::StrCat(
+          "group_indices.size ", group_indices.size(),
+          ", !=  input_strides.size-1 ", input_strides.size() - 1, ".")));
   result->clear();
   auto input_flat = input_tensor.flat<T>();
   const auto start = std::inner_product(
@@ -269,8 +282,8 @@ void SetSizeOp<T>::Compute(OpKernelContext* ctx) {
                  TensorShapeUtils::MakeShape(output_shape, &output_shape_ts));
   Tensor* out_t;
   OP_REQUIRES_OK(ctx, ctx->allocate_output(0, output_shape_ts, &out_t));
-  auto out = out_t->flat<int32>();
-  out.device(ctx->eigen_cpu_device()) = out.constant(static_cast<int32>(0.0));
+  auto out = out_t->flat<int32_t>();
+  out.device(ctx->eigen_cpu_device()) = out.constant(static_cast<int32_t>(0.0));
 
   // Group by all but last dimension, create a set of group values, and add set
   // size to output.
@@ -282,6 +295,9 @@ void SetSizeOp<T>::Compute(OpKernelContext* ctx) {
     const auto group_key = group.group();
     const auto output_index = std::inner_product(
         group_key.begin(), group_key.end(), output_strides.begin(), 0LL);
+    OP_REQUIRES(ctx, output_index < out.size(),
+                errors::InvalidArgument("Index out of range, ", group.indices(),
+                                        " vs ", output_shape_ts.DebugString()));
     out(output_index) = group_set.size();
   }
 }
@@ -290,12 +306,12 @@ void SetSizeOp<T>::Compute(OpKernelContext* ctx) {
   REGISTER_KERNEL_BUILDER(                                       \
       Name("SetSize").Device(DEVICE_CPU).TypeConstraint<T>("T"), \
       SetSizeOp<T>);
-_SET_SIZE_REGISTER_KERNEL_BUILDER(int8);
-_SET_SIZE_REGISTER_KERNEL_BUILDER(int16);
-_SET_SIZE_REGISTER_KERNEL_BUILDER(int32);
+_SET_SIZE_REGISTER_KERNEL_BUILDER(int8_t);
+_SET_SIZE_REGISTER_KERNEL_BUILDER(int16_t);
+_SET_SIZE_REGISTER_KERNEL_BUILDER(int32_t);
 _SET_SIZE_REGISTER_KERNEL_BUILDER(int64_t);
-_SET_SIZE_REGISTER_KERNEL_BUILDER(uint8);
-_SET_SIZE_REGISTER_KERNEL_BUILDER(uint16);
+_SET_SIZE_REGISTER_KERNEL_BUILDER(uint8_t);
+_SET_SIZE_REGISTER_KERNEL_BUILDER(uint16_t);
 _SET_SIZE_REGISTER_KERNEL_BUILDER(tstring);
 #undef _SET_SIZE_REGISTER_KERNEL_BUILDER
 
@@ -308,12 +324,11 @@ enum InputTypes {
 enum SetOperation { A_MINUS_B = 0, B_MINUS_A = 1, INTERSECTION = 2, UNION = 3 };
 
 SetOperation SetOperationFromContext(OpKernelConstruction* ctx) {
-  string set_operation_str;
+  std::string set_operation_str;
   if (!ctx->GetAttr("set_operation", &set_operation_str).ok()) {
-    ctx->CtxFailure(errors::InvalidArgument("Missing set_operation."));
+    ctx->CtxFailure(absl::InvalidArgumentError("Missing set_operation."));
   } else {
-    std::transform(set_operation_str.begin(), set_operation_str.end(),
-                   set_operation_str.begin(), ::tolower);
+    absl::AsciiStrToLower(&set_operation_str);
     if ("a-b" == set_operation_str) {
       return A_MINUS_B;
     }
@@ -324,8 +339,8 @@ SetOperation SetOperationFromContext(OpKernelConstruction* ctx) {
       return INTERSECTION;
     }
     if ("union" != set_operation_str) {
-      ctx->CtxFailure(errors::InvalidArgument("Invalid set_operation ",
-                                              set_operation_str, "."));
+      ctx->CtxFailure(absl::InvalidArgumentError(
+          absl::StrCat("Invalid set_operation ", set_operation_str, ".")));
     }
   }
   // NOTE: This is not the default, this function fails if no 'set_operation'
@@ -410,26 +425,26 @@ void SetOperationOp<T>::ApplySetOperation(const absl::flat_hash_set<T>& set1,
 }
 
 // Validate shapes have the same dimensions.
-Status CheckShapesMatch(VarDimArray shape1, VarDimArray shape2) {
+absl::Status CheckShapesMatch(VarDimArray shape1, VarDimArray shape2) {
   if (shape1 != shape2) {
-    return errors::InvalidArgument("Mismatched shapes [",
-                                   absl::StrJoin(shape1, ","), "] vs [",
-                                   absl::StrJoin(shape2, ","), "]");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Mismatched shapes [", absl::StrJoin(shape1, ","),
+                     "] vs [", absl::StrJoin(shape2, ","), "]"));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Validate ranks are the same, and all but last dimension are the same.
 // Return GroupShape.
-Status GroupShapeFromInputs(VarDimArray shape1, VarDimArray shape2,
-                            ShapeArray* group_shape) {
+absl::Status GroupShapeFromInputs(VarDimArray shape1, VarDimArray shape2,
+                                  ShapeArray* group_shape) {
   ShapeArray group_shape_1;
   TF_RETURN_IF_ERROR(GroupShape(shape1, &group_shape_1));
   ShapeArray group_shape_2;
   TF_RETURN_IF_ERROR(GroupShape(shape2, &group_shape_2));
   TF_RETURN_IF_ERROR(CheckShapesMatch(group_shape_1, group_shape_2));
   *group_shape = group_shape_1;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Split `flat_group_index` into separate dimensions based on `group_shape`.
@@ -504,7 +519,7 @@ void SetOperationOp<T>::ComputeDenseToDense(OpKernelContext* ctx) const {
 
   TensorShape output_shape;
   OP_REQUIRES_OK(ctx, TensorShapeUtils::MakeShape(group_shape, &output_shape));
-  output_shape.AddDim(max_set_size);
+  OP_REQUIRES_OK(ctx, output_shape.AddDimWithStatus(max_set_size));
   OutputSparseTensor<T>(ctx, output_shape, num_result_values, group_sets);
 }
 
@@ -555,9 +570,9 @@ void SetOperationOp<T>::ComputeDenseToSparse(OpKernelContext* ctx) const {
       const auto set2_group_indices = group.group();
       OP_REQUIRES(
           ctx, set2_group_indices.size() == group_indices.size(),
-          errors::InvalidArgument("Invalid number of group indices ",
-                                  set2_group_indices.size(), ", expected ",
-                                  group_indices.size(), "."));
+          absl::InvalidArgumentError(absl::StrCat(
+              "Invalid number of group indices ", set2_group_indices.size(),
+              ", expected ", group_indices.size(), ".")));
       bool group_match = true;
       for (int32_t i = 0; group_match && (i < set2_group_indices.size()); ++i) {
         if (set2_group_indices[i] != group_indices[i]) {
@@ -585,7 +600,7 @@ void SetOperationOp<T>::ComputeDenseToSparse(OpKernelContext* ctx) const {
 
   TensorShape output_shape;
   OP_REQUIRES_OK(ctx, TensorShapeUtils::MakeShape(group_shape, &output_shape));
-  output_shape.AddDim(max_set_size);
+  OP_REQUIRES_OK(ctx, output_shape.AddDimWithStatus(max_set_size));
   OutputSparseTensor<T>(ctx, output_shape, num_result_values, group_sets);
 }
 
@@ -609,9 +624,9 @@ void CompareGroups(OpKernelContext* ctx,
     return;
   }
   OP_REQUIRES(ctx, set1_group_indices.size() == set2_group_indices.size(),
-              errors::InvalidArgument("Mismatched group dims ",
-                                      set1_group_indices.size(), " vs ",
-                                      set2_group_indices.size(), "."));
+              absl::InvalidArgumentError(absl::StrCat(
+                  "Mismatched group dims ", set1_group_indices.size(), " vs ",
+                  set2_group_indices.size(), ".")));
   for (int32_t i = 0; i < set1_group_indices.size(); ++i) {
     *result = set1_group_indices[i] - set2_group_indices[i];
     if (*result != 0) {
@@ -703,7 +718,7 @@ void SetOperationOp<T>::ComputeSparseToSparse(OpKernelContext* ctx) const {
 
   TensorShape output_shape;
   OP_REQUIRES_OK(ctx, TensorShapeUtils::MakeShape(group_shape, &output_shape));
-  output_shape.AddDim(max_set_size);
+  OP_REQUIRES_OK(ctx, output_shape.AddDimWithStatus(max_set_size));
   OutputSparseTensor<T>(ctx, output_shape, num_result_values, group_sets);
 }
 
@@ -738,12 +753,12 @@ class DenseToDenseSetOperationOp : public SetOperationOp<T> {
                               .Device(DEVICE_CPU)                \
                               .TypeConstraint<T>("T"),           \
                           DenseToDenseSetOperationOp<T>);
-_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int8);
-_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int16);
-_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int32);
+_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int8_t);
+_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int16_t);
+_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int32_t);
 _DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int64_t);
-_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint8);
-_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint16);
+_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint8_t);
+_DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint16_t);
 _DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(tstring);
 #undef _DENSE_TO_DENSE_SET_OPERATION_REGISTER_KERNEL_BUILDER
 
@@ -759,12 +774,12 @@ class DenseToSparseSetOperationOp : public SetOperationOp<T> {
                               .Device(DEVICE_CPU)                 \
                               .TypeConstraint<T>("T"),            \
                           DenseToSparseSetOperationOp<T>);
-_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int8);
-_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int16);
-_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int32);
+_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int8_t);
+_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int16_t);
+_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int32_t);
 _DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int64_t);
-_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint8);
-_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint16);
+_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint8_t);
+_DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint16_t);
 _DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(tstring);
 #undef _DENSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER
 
@@ -780,12 +795,12 @@ class SparseToSparseSetOperationOp : public SetOperationOp<T> {
                               .Device(DEVICE_CPU)                  \
                               .TypeConstraint<T>("T"),             \
                           SparseToSparseSetOperationOp<T>);
-_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int8);
-_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int16);
-_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int32);
+_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int8_t);
+_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int16_t);
+_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int32_t);
 _SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(int64_t);
-_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint8);
-_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint16);
+_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint8_t);
+_SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(uint16_t);
 _SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER(tstring);
 #undef _SPARSE_TO_SPARSE_SET_OPERATION_REGISTER_KERNEL_BUILDER
 

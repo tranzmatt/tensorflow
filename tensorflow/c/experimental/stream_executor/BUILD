@@ -1,16 +1,15 @@
 # Description:
 # StreamExecutor C API.
 
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_test",
 )
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -27,7 +26,7 @@ cc_library(
     hdrs = ["stream_executor.h"],
     visibility = ["//tensorflow:internal"],
     deps = [
-        "//tensorflow/c:c_api_macros",
+        "//tensorflow/c:c_api_macros_hdrs",
         "//tensorflow/c:tf_status_headers",
     ],
 )
@@ -44,14 +43,31 @@ cc_library(
         "//tensorflow/c:tf_status_helper",
         "//tensorflow/core:lib",
         "//tensorflow/core/common_runtime/device:device_utils",
-        "//tensorflow/core/platform:regexp",
-        "//tensorflow/core/platform:strcat",
-        "//tensorflow/stream_executor:executor_cache",
-        "//tensorflow/stream_executor:multi_platform_manager",
-        "//tensorflow/stream_executor:platform",
-        "//tensorflow/stream_executor:stream_executor_internal",
-        "//tensorflow/stream_executor:stream_executor_pimpl",
-        "//tensorflow/stream_executor:timer",
+        "@com_google_absl//absl/functional:any_invocable",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:optional",
+        "@xla//xla/stream_executor:allocator_stats",
+        "@xla//xla/stream_executor:device_description",
+        "@xla//xla/stream_executor:device_memory",
+        "@xla//xla/stream_executor:event",
+        "@xla//xla/stream_executor:executor_cache",
+        "@xla//xla/stream_executor:generic_memory_allocation",
+        "@xla//xla/stream_executor:generic_memory_allocator",
+        "@xla//xla/stream_executor:memory_allocation",
+        "@xla//xla/stream_executor:memory_allocator",
+        "@xla//xla/stream_executor:memory_space",
+        "@xla//xla/stream_executor:platform",
+        "@xla//xla/stream_executor:platform_manager",
+        "@xla//xla/stream_executor:stream",
+        "@xla//xla/stream_executor:stream_executor_common",
+        "@xla//xla/stream_executor:stream_executor_h",
+        "@xla//xla/tsl/framework:allocator",
+        "@xla//xla/tsl/platform:status",
     ],
 )
 
@@ -69,8 +85,18 @@ cc_library(
         "//tensorflow/c:c_api_macros",
         "//tensorflow/c:tf_status",
         "//tensorflow/c:tf_status_helper",
-        "//tensorflow/stream_executor:executor_cache",
-        "//tensorflow/stream_executor/lib",
+        "@com_google_absl//absl/functional:any_invocable",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
+        "@xla//xla/stream_executor:device_memory",
+        "@xla//xla/stream_executor:event",
+        "@xla//xla/stream_executor:executor_cache",
+        "@xla//xla/stream_executor:platform",
+        "@xla//xla/stream_executor:stream",
+        "@xla//xla/stream_executor:stream_common",
+        "@xla//xla/stream_executor:stream_executor_h",
+        "@xla//xla/tsl/platform:errors",
+        "@xla//xla/tsl/platform:statusor",
     ],
 )
 
@@ -84,9 +110,17 @@ tf_cc_test(
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core/protobuf:error_codes_proto_impl_cc",
-        "//tensorflow/stream_executor:multi_platform_manager",
-        "//tensorflow/stream_executor:stream",
-        "//tensorflow/stream_executor:stream_executor_pimpl",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:optional",
+        "@com_google_googletest//:gtest_main",
+        "@xla//xla/stream_executor:event",
+        "@xla//xla/stream_executor:platform_manager",
+        "@xla//xla/stream_executor:stream",
+        "@xla//xla/stream_executor:stream_executor_h",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/protobuf:error_codes_proto_impl_cc",
     ],
 )
 

@@ -15,15 +15,25 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2xla/kernels/case_op.h"
 
+#include <cstdint>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include "absl/log/log.h"
+#include "absl/types/span.h"
 #include "tensorflow/compiler/tf2xla/kernels/if_while_utils.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/side_effect_util.h"
 #include "tensorflow/compiler/tf2xla/xla_context.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/lib/dynamic_shaped_ops.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/lib/dynamic_shaped_ops.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "tensorflow/core/framework/attr_value.pb.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 
 namespace tensorflow {
@@ -57,7 +67,7 @@ XlaCaseOp::GetPrunedBranchesAndIndex(XlaOpKernelContext* ctx) {
     return {unpruned_branches_, ctx->Input(0)};
   }
 
-  int32_t branch_index = branch_index_literal.Get<int32>({});
+  int32_t branch_index = branch_index_literal.Get<int32_t>({});
   if (branch_index < 0 || branch_index >= unpruned_branches_.size()) {
     branch_index = unpruned_branches_.size() - 1;
   }
@@ -117,7 +127,7 @@ void XlaCaseOp::Compile(XlaOpKernelContext* ctx) {
       // necessary for forwarding shapes of DT_VARIANTs, e.g. TensorLists.
       auto shape_or = ctx->builder()->GetShape(ctx->Input(i + 1));
       OP_REQUIRES_OK(ctx, shape_or.status());
-      arg.shape = shape_or.ValueOrDie();
+      arg.shape = shape_or.value();
       VLOG(2) << "Arg type: " << DataTypeString(arg.type)
               << " shape: " << arg.HumanString();
     }
@@ -162,6 +172,10 @@ void XlaCaseOp::Compile(XlaOpKernelContext* ctx) {
     OP_REQUIRES_OK(ctx,
                    compiler->CompileFunction(options, branches[j], arguments,
                                              &branch_results[j]));
+    OP_REQUIRES_OK(
+        ctx,
+        ctx->xla_context()->RecordCollectiveInfoFromNestedCompilationResult(
+            branch_results[j]));
   }
 
   bool has_tensor_array_gradients = false;
@@ -174,7 +188,8 @@ void XlaCaseOp::Compile(XlaOpKernelContext* ctx) {
 
       // Add any TensorArray gradients touched by the then/else computation to
       // the enclosing graph.
-      for (const string& grad_source : update.tensor_array_gradients_accessed) {
+      for (const std::string& grad_source :
+           update.tensor_array_gradients_accessed) {
         VLOG(5) << "TensorArray " << resource->name() << " accessed gradient "
                 << grad_source;
         XlaResource* gradient;
@@ -275,10 +290,11 @@ void XlaCaseOp::Compile(XlaOpKernelContext* ctx) {
     if (has_token_input_output_ && i == num_inputs - 1) {
       // Set token input for this "case" op.
       std::vector<xla::XlaOp> token_inputs;
-      for (const string& node_name : token_input_nodes_) {
+      token_inputs.reserve(token_input_nodes_.size());
+      for (const std::string& node_name : token_input_nodes_) {
         auto token_or = compiler->GetNodeToken(node_name);
         OP_REQUIRES_OK(ctx, token_or.status());
-        token_inputs.push_back(token_or.ValueOrDie());
+        token_inputs.push_back(token_or.value());
       }
       inputs[i] = xla::AfterAll(b, token_inputs);
     } else if (ctx->input_type(input_num) == DT_RESOURCE) {
@@ -301,7 +317,7 @@ void XlaCaseOp::Compile(XlaOpKernelContext* ctx) {
       auto shape_or = b->GetShape(output_handle);
       if (shape_or.ok()) {
         LOG(INFO) << "Shape for output " << i << ": "
-                  << xla::ShapeUtil::HumanString(shape_or.ValueOrDie());
+                  << xla::ShapeUtil::HumanString(shape_or.value());
       } else {
         LOG(INFO) << "Shape unknown for output " << i;
       }
@@ -323,10 +339,10 @@ void XlaCaseOp::Compile(XlaOpKernelContext* ctx) {
         xla::GetTupleElement(outputs, output_types_.size() + num_resource_args);
     auto shape_or = b->GetShape(token_output);
     OP_REQUIRES_OK(ctx, shape_or.status());
-    OP_REQUIRES(ctx, shape_or.ValueOrDie().IsToken(),
+    OP_REQUIRES(ctx, shape_or.value().IsToken(),
                 errors::FailedPrecondition(
                     "Token output is not token type: ",
-                    xla::ShapeUtil::HumanString(shape_or.ValueOrDie())));
+                    xla::ShapeUtil::HumanString(shape_or.value())));
     OP_REQUIRES_OK(ctx,
                    compiler->SetNodeToken(original_node_name_, token_output));
   }

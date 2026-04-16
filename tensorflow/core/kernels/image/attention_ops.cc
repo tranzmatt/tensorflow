@@ -15,6 +15,7 @@ limitations under the License.
 
 // See docs in ../ops/image_ops.cc.
 
+#include <cstdint>
 #define EIGEN_USE_THREADS
 
 #include <vector>
@@ -32,12 +33,12 @@ namespace tensorflow {
 class ExtractGlimpseOp : public OpKernel {
  public:
   explicit ExtractGlimpseOp(OpKernelConstruction* context) : OpKernel(context) {
-    const string& op = context->def().op();
+    const std::string& op = context->def().op();
     version_ = (op == "ExtractGlimpse") ? 1 : 2;
     OP_REQUIRES_OK(context, context->GetAttr("normalized", &normalized_));
     OP_REQUIRES_OK(context, context->GetAttr("centered", &centered_));
     bool uniform_noise = false;
-    string noise;
+    std::string noise;
     OP_REQUIRES_OK(context, context->GetAttr("uniform_noise", &uniform_noise));
     OP_REQUIRES_OK(context, context->GetAttr("noise", &noise));
     OP_REQUIRES(context,
@@ -87,9 +88,10 @@ class ExtractGlimpseOp : public OpKernel {
 
     const int64_t output_height = window_size.tensor<int, 1>()(0);
     const int64_t output_width = window_size.tensor<int, 1>()(1);
+
     TensorShape output_shape = input_shape;
-    output_shape.set_dim(1, output_height);
-    output_shape.set_dim(2, output_width);
+    OP_REQUIRES_OK(context, output_shape.SetDimWithStatus(1, output_height));
+    OP_REQUIRES_OK(context, output_shape.SetDimWithStatus(2, output_width));
 
     const Tensor& offsets = context->input(2);
     OP_REQUIRES(context, offsets.shape().dims() == 2,
@@ -130,7 +132,7 @@ class ExtractGlimpseOp : public OpKernel {
   bool normalized_;
   bool centered_;
   Eigen::ExtractGlimpsesNoiseMode noise_;
-  int32 version_;
+  int32_t version_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("ExtractGlimpse").Device(DEVICE_CPU),

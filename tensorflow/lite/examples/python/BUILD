@@ -1,15 +1,22 @@
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+
 package(
-    default_visibility = ["//tensorflow:internal"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     licenses = ["notice"],
 )
 
-py_binary(
-    name = "label_image",
-    srcs = ["label_image.py"],
-    main = "label_image.py",
-    python_version = "PY3",
-    srcs_version = "PY3",
-    deps = [
-        "//tensorflow:tensorflow_py",
-    ],
-)
+# Commented out under the (b/279852433) because caused an error in the OSS
+# TODO(zhurakovskyi): Uncomment when fixed.
+# copybara:uncomment_begin
+# py_binary(
+#     name = "label_image",
+#     srcs = ["label_image.py"],
+#     main = "label_image.py",
+#     strict_deps = True,
+#     deps = [
+#         "//third_party/py/PIL:pil",
+#         "//third_party/py/numpy",
+#         "//tensorflow/lite/python:lite",
+#     ],
+# )
+# copybara:uncomment_end

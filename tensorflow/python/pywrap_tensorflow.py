@@ -15,10 +15,24 @@
 """A Python wrapper that loads _pywrap_tensorflow_internal.so."""
 
 import ctypes
+# importing hashlib to avoid a linkage issue. refer b/372709714
+import hashlib
+import os
 import sys
 import traceback
 
+
+# TODO(vam): Override boringssl static linking by explicitly importing openssl
+# Please refer to b/304394983 for more information.
+try:
+  import ssl
+except ImportError:
+  print(f'{traceback.format_exc()}')
+  print('\nWarning: Failed to load ssl module. Continuing without ssl support.')
+
 from tensorflow.python.platform import self_check
+
+# TODO(mdan): Cleanup antipattern: import for side effects.
 
 # Perform pre-load sanity checks in order to produce a more actionable error.
 self_check.preload_check()
@@ -71,7 +85,15 @@ try:
     pywrap_dlopen_global_flags.reset_dlopen_flags()
   elif _can_set_rtld_local:
     sys.setdlopenflags(_default_dlopen_flags)
-except ImportError:
+except ImportError as exc:
+  if os.name == 'nt':
+    try:
+      from tensorflow.python.platform import windows_lib_diagnostics
+      windows_lib_diagnostics.run_diagnosis()
+    except (ImportError, RuntimeError, OSError):
+      # Catch specific exceptions that might occur during diagnosis,
+      # but don't let them prevent the main ImportError from being raised.
+      pass
   raise ImportError(
       f'{traceback.format_exc()}'
       f'\n\nFailed to load the native TensorFlow runtime.\n'
@@ -79,6 +101,6 @@ except ImportError:
       f'for some common causes and solutions.\n'
       f'If you need help, create an issue '
       f'at https://github.com/tensorflow/tensorflow/issues '
-      f'and include the entire stack trace above this error message.')
+      f'and include the entire stack trace above this error message.') from exc
 
 # pylint: enable=wildcard-import,g-import-not-at-top,unused-import,line-too-long

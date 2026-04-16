@@ -19,7 +19,7 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/bias_op.h"
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -27,15 +27,14 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/kernels/redux_functor.h"
 #include "tensorflow/core/profiler/lib/scoped_annotation.h"
+#include "tensorflow/core/util/determinism.h"
 #include "tensorflow/core/util/tensor_format.h"
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#include "xla/stream_executor/event_based_timer.h"
 #include "tensorflow/core/kernels/bias_op_gpu.h"
 #include "tensorflow/core/platform/stream_executor.h"
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-#if GOOGLE_CUDA
-#include "tensorflow/stream_executor/cuda/cuda_stream.h"
-#endif  // GOOGLE_CUDA
 
 namespace tensorflow {
 
@@ -45,8 +44,8 @@ typedef Eigen::GpuDevice GPUDevice;
 namespace {
 
 void GetBiasValueDims(const Tensor& value_tensor, TensorFormat data_format,
-                      int32* batch, int32* height, int32* width, int32* depth,
-                      int32* channel) {
+                      int32_t* batch, int32_t* height, int32_t* width,
+                      int32_t* depth, int32_t* channel) {
   *batch = 1;
   *height = 1;
   *width = 1;
@@ -54,19 +53,19 @@ void GetBiasValueDims(const Tensor& value_tensor, TensorFormat data_format,
   *channel = 1;
   if (data_format == FORMAT_NHWC) {
     int32_t channel_dim = value_tensor.dims() - 1;
-    *channel = static_cast<int32>(value_tensor.dim_size(channel_dim));
+    *channel = static_cast<int32_t>(value_tensor.dim_size(channel_dim));
     for (int32_t i = 0; i < channel_dim; i++) {
-      *batch *= static_cast<int32>(value_tensor.dim_size(i));
+      *batch *= static_cast<int32_t>(value_tensor.dim_size(i));
     }
   } else if (data_format == FORMAT_NCHW) {
-    *batch = static_cast<int32>(value_tensor.dim_size(0));
-    *channel = static_cast<int32>(value_tensor.dim_size(1));
-    *height = static_cast<int32>(value_tensor.dim_size(2));
+    *batch = static_cast<int32_t>(value_tensor.dim_size(0));
+    *channel = static_cast<int32_t>(value_tensor.dim_size(1));
+    *height = static_cast<int32_t>(value_tensor.dim_size(2));
     if (value_tensor.dims() > 3) {
-      *width = static_cast<int32>(value_tensor.dim_size(3));
+      *width = static_cast<int32_t>(value_tensor.dim_size(3));
     }
     if (value_tensor.dims() > 4) {
-      *depth = static_cast<int32>(value_tensor.dim_size(4));
+      *depth = static_cast<int32_t>(value_tensor.dim_size(4));
     }
   }
 }
@@ -89,7 +88,7 @@ template <typename Device, typename T>
 class BiasOp : public BinaryOp<T> {
  public:
   explicit BiasOp(OpKernelConstruction* context) : BinaryOp<T>(context) {
-    string data_format;
+    std::string data_format;
     if (context->GetAttr("data_format", &data_format).ok()) {
       OP_REQUIRES(context, FormatFromString(data_format, &data_format_),
                   errors::InvalidArgument("Invalid data format"));
@@ -159,7 +158,7 @@ template <typename Device, typename T>
 class BiasGradOp : public OpKernel {
  public:
   explicit BiasGradOp(OpKernelConstruction* context) : OpKernel(context) {
-    string data_format;
+    std::string data_format;
     if (context->GetAttr("data_format", &data_format).ok()) {
       OP_REQUIRES(context, FormatFromString(data_format, &data_format_),
                   errors::InvalidArgument("Invalid data format"));
@@ -179,7 +178,7 @@ class BiasGradOp : public OpKernel {
     OP_REQUIRES(
         context,
         FastBoundsCheck(output_backprop.NumElements(),
-                        std::numeric_limits<int32>::max()),
+                        std::numeric_limits<int32_t>::max()),
         errors::InvalidArgument("BiasGrad requires tensor size <= int32 max"));
 
     int channel_dim;
@@ -238,7 +237,7 @@ class BiasOp<GPUDevice, T> : public BinaryOp<T> {
  public:
   typedef GPUDevice Device;
   explicit BiasOp(OpKernelConstruction* context) : BinaryOp<T>(context) {
-    string data_format;
+    std::string data_format;
     if (context->GetAttr("data_format", &data_format).ok()) {
       OP_REQUIRES(context, FormatFromString(data_format, &data_format_),
                   errors::InvalidArgument("Invalid data format"));
@@ -291,17 +290,17 @@ class BiasOp<GPUDevice, T> : public BinaryOp<T> {
       BiasOp<GPUDevice, type>);
 
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU_KERNEL);
-REGISTER_GPU_KERNEL(int32);
+REGISTER_GPU_KERNEL(int32_t);
 #undef REGISTER_GPU_KERNEL
 
 struct BiasGradAutotuneGroup {
-  static string name() { return "BiasGrad"; }
+  static std::string name() { return "BiasGrad"; }
 };
 
 class BiasAddGradGPUConfig {
  public:
   BiasAddGradGPUConfig() : mode_(BiasAddGradGPUMode::kReduction) {}
-  string ToString() const {
+  std::string ToString() const {
     if (mode_ == BiasAddGradGPUMode::kNative) {
       return "native CUDA kernel.";
     }
@@ -330,7 +329,7 @@ class BiasAddGradGPUConfig {
 class BiasAddParams {
  public:
   // We use a list to maintain both the shape value and the order (data format).
-  using SpatialArray = gtl::InlinedVector<int64_t, 4>;
+  using SpatialArray = absl::InlinedVector<int64_t, 4UL>;
   BiasAddParams(const SpatialArray& in_shape, TensorFormat data_format,
                 DataType dtype, int device_id)
       : in_shape_(in_shape),
@@ -351,9 +350,9 @@ class BiasAddParams {
   bool operator!=(const BiasAddParams& other) const {
     return !(*this == other);
   }
-  uint64 hash() const { return hash_code_; }
+  uint64_t hash() const { return hash_code_; }
 
-  string ToString() const {
+  std::string ToString() const {
     // clang-format off
     return strings::StrCat(
         "(", absl::StrJoin(in_shape_, ", "), "), ",
@@ -368,7 +367,7 @@ class BiasAddParams {
     return std::make_tuple(in_shape_, data_format_, dtype_, device_id_);
   }
 
-  uint64 hash_code_ = 0;
+  uint64_t hash_code_ = 0;
 
  private:
   SpatialArray in_shape_;
@@ -386,7 +385,7 @@ class BiasGradOp<GPUDevice, T> : public OpKernel {
  public:
   typedef GPUDevice Device;
   explicit BiasGradOp(OpKernelConstruction* context) : OpKernel(context) {
-    string data_format;
+    std::string data_format;
     if (context->GetAttr("data_format", &data_format).ok()) {
       OP_REQUIRES(context, FormatFromString(data_format, &data_format_),
                   errors::InvalidArgument("Invalid data format"));
@@ -454,10 +453,17 @@ class BiasGradOp<GPUDevice, T> : public OpKernel {
     if (channel == 0) return;
     auto* stream = context->op_device_context()->stream();
     OP_REQUIRES(context, stream, errors::Internal("No GPU stream available."));
-    se::DeviceMemoryBase output_ptr(output->flat<T>().data(),
-                                    output->NumElements() * sizeof(T));
-    stream->ThenMemZero(&output_ptr, output->NumElements() * sizeof(T));
+    stream_executor::DeviceAddressBase output_ptr(
+        output->flat<T>().data(), output->NumElements() * sizeof(T));
+    OP_REQUIRES_OK(context, stream->MemZero(&output_ptr,
+                                            output->NumElements() * sizeof(T)));
     if (output_backprop.NumElements() <= 0) return;
+    if (OpDeterminismRequired()) {
+      // ComputeWithReduceSum is the only deterministic algorithm.
+      ComputeWithReduceSum(context, output_backprop, batch, width, height,
+                           depth, channel, output);
+      return;
+    }
 
     int device_id = stream->parent()->device_ordinal();
     DataType dtype = output_backprop.dtype();
@@ -471,31 +477,39 @@ class BiasGradOp<GPUDevice, T> : public OpKernel {
     // Autotune two algorithm: customized
     BiasAddGradGPUConfig algo_config;
     if (!AutotuneBiasGrad::GetInstance()->Find(bias_parameters, &algo_config)) {
-      profiler::ScopedAnnotation trace("bias_grad_autotuning");
+      tsl::profiler::ScopedAnnotation trace("bias_grad_autotuning");
 
       BiasGradGPUProfileResult best_result;
+
       // Initialize the timer.
-      perftools::gputools::Timer timer(stream->parent());
-      stream->InitTimer(&timer);
-      stream->ThenStartTimer(&timer);
+      absl::StatusOr<std::unique_ptr<stream_executor::EventBasedTimer>> timer =
+          stream->CreateEventBasedTimer(false);
+      OP_REQUIRES_OK(context, timer.status());
       ComputeWithCustomKernel(context, output_backprop, batch, width, height,
                               depth, channel, output);
-      stream->ThenStopTimer(&timer);
-      uint64 elapsed_microseconds = timer.Microseconds();
+      absl::StatusOr<absl::Duration> bias_duration =
+          timer.value()->GetElapsedDuration();
+      OP_REQUIRES_OK(context, bias_duration.status());
+      int64_t elapsed_microseconds = absl::ToInt64Microseconds(*bias_duration);
+
       VLOG(1) << "BiasAddGrad " << bias_parameters.ToString()
-              << " Native algo latency: " << elapsed_microseconds;
+              << " Native algo latency: " << elapsed_microseconds << "us";
       if (elapsed_microseconds < best_result.elapsed_time()) {
         best_result.set_algorithm(BiasAddGradGPUMode::kNative);
         best_result.set_elapsed_time(elapsed_microseconds);
       }
 
       // Try reduction and profile.
-      stream->ThenStartTimer(&timer);
+      absl::StatusOr<std::unique_ptr<stream_executor::EventBasedTimer>>
+          reduction_timer = stream->CreateEventBasedTimer(false);
+      OP_REQUIRES_OK(context, reduction_timer.status());
       ComputeWithReduceSum(context, output_backprop, batch, width, height,
                            depth, channel, output);
-      stream->ThenStopTimer(&timer);
+      absl::StatusOr<absl::Duration> reduction_duration =
+          reduction_timer.value()->GetElapsedDuration();
+      OP_REQUIRES_OK(context, reduction_duration.status());
 
-      elapsed_microseconds = timer.Microseconds();
+      elapsed_microseconds += absl::ToInt64Microseconds(*reduction_duration);
       VLOG(1) << "BiasAddGrad " << bias_parameters.ToString()
               << " Reduction algo latency: " << elapsed_microseconds;
       if (elapsed_microseconds < best_result.elapsed_time()) {

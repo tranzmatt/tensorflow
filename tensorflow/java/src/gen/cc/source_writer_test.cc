@@ -13,12 +13,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/java/src/gen/cc/source_writer.h"
+
 #include <list>
 
-#include "tensorflow/core/lib/io/path.h"
+#include "tensorflow/core/platform/path.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/java/src/gen/cc/java_defs.h"
-#include "tensorflow/java/src/gen/cc/source_writer.h"
 
 namespace tensorflow {
 namespace java {
@@ -264,9 +266,9 @@ TEST(StreamTest, Types) {
 
 TEST(StreamTest, FileSnippet) {
   SourceBufferWriter writer;
-  const string fname = tensorflow::io::JoinPath(
-      tensorflow::testing::TensorFlowSrcRoot(),
-      "java/src/gen/resources/test.java.snippet");
+  const std::string fname =
+      tensorflow::io::JoinPath(tensorflow::testing::TensorFlowSrcRoot(),
+                               "java/src/gen/resources/test.java.snippet");
 
   writer.WriteFromFile(fname)
         .BeginBlock()

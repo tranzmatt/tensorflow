@@ -3,16 +3,20 @@
 # Also contains information about git repository deposited by configure
 # in gen/...
 
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+load("//tensorflow:tensorflow.bzl", "if_oss")
+
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
+
+exports_files(["gen_git_source.py"])
 
 py_binary(
     name = "gen_git_source",
     srcs = ["gen_git_source.py"],
-    exec_compatible_with = ["@local_execution_config_platform//:platform_constraint"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    tags = ["no-remote-exec"],
+    strict_deps = True,
+    tags = if_oss(["no-remote-exec"]),
 )

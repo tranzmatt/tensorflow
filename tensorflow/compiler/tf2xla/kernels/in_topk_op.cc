@@ -13,19 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/arithmetic.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/lib/sorting.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/literal.h"
-#include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
+#include "xla/hlo/builder/lib/arithmetic.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
-#include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace {
@@ -94,7 +96,7 @@ class InTopKOp : public XlaOpKernel {
         xla::CreateScalarAddComputation(xla::S32, xla_builder), {1});
 
     xla::XlaOp result =
-        xla::And(xla::Lt(num_gt_r1, xla::ConstantR0<int32>(xla_builder, k)),
+        xla::And(xla::Lt(num_gt_r1, xla::ConstantR0<int32_t>(xla_builder, k)),
                  xla::IsFinite(targets_values_r1));
 
     context->SetOutput(0, result);
@@ -104,7 +106,8 @@ class InTopKOp : public XlaOpKernel {
   DataType targets_dtype_;
   xla::PrimitiveType targets_type_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(InTopKOp);
+  InTopKOp(const InTopKOp&) = delete;
+  void operator=(const InTopKOp&) = delete;
 };
 
 REGISTER_XLA_OP(Name("InTopKV2")

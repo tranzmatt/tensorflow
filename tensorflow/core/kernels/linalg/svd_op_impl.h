@@ -22,8 +22,9 @@ limitations under the License.
 // individual kernels. A separate file is used for each instantiated kernel to
 // improve compilation times.
 #include <algorithm>
+#include <limits>
 
-#include "third_party/eigen3/Eigen/SVD"
+#include "Eigen/SVD"  // from @eigen_archive
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -72,8 +73,9 @@ class SvdOp : public LinearAlgebraOp<Scalar> {
     double m = static_cast<double>(input_matrix_shapes[0].dim_size(0));
     double n = static_cast<double>(input_matrix_shapes[0].dim_size(1));
     double cost = 12 * std::max(m, n) * std::min(m, n) * std::min(m, n);
-    return cost >= static_cast<double>(kint64max) ? kint64max
-                                                  : static_cast<int64_t>(cost);
+    return cost >= static_cast<double>(std::numeric_limits<int64_t>::max())
+               ? std::numeric_limits<int64_t>::max()
+               : static_cast<int64_t>(cost);
   }
 
   using Matrix = typename Base::Matrix;
@@ -126,7 +128,8 @@ class SvdOp : public LinearAlgebraOp<Scalar> {
   bool compute_uv_;
   bool full_matrices_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(SvdOp);
+  SvdOp(const SvdOp&) = delete;
+  void operator=(const SvdOp&) = delete;
 };
 
 }  // namespace tensorflow

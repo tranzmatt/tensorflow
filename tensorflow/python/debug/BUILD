@@ -8,7 +8,10 @@
 #   For a user interface walkthrough, see https://www.tensorflow.org/guide/debugger
 # ":grpc_debug_server": Server interface for grpc:// debug URLs.
 
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow:internal"],
     licenses = ["notice"],
 )
@@ -16,10 +19,10 @@ package(
 py_library(
     name = "debug_py",
     srcs = ["__init__.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
+    tags = ["keep_dep"],  # Generated files need dependencies that build_cleaner would remove
     visibility = ["//visibility:public"],
     deps = [
-        "//tensorflow/python:util",
         "//tensorflow/python/debug/lib:check_numerics_callback",
         "//tensorflow/python/debug/lib:debug_data",
         "//tensorflow/python/debug/lib:debug_events_monitors",
@@ -36,6 +39,7 @@ py_library(
         "//tensorflow/python/debug/wrappers:grpc_wrapper",
         "//tensorflow/python/debug/wrappers:hooks",
         "//tensorflow/python/debug/wrappers:local_cli_wrapper",
+        "//tensorflow/python/util:all_util",
     ],
 )
 
@@ -43,9 +47,9 @@ py_library(
 py_library(
     name = "debug_pip",
     data = ["//tensorflow/python/debug/lib:grpc_tensorflow_server"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
-        "//tensorflow/python/debug:debug_py",
+        ":debug_py",
         "//tensorflow/python/debug/cli:cli_test_utils",
         "//tensorflow/python/debug/cli:offline_analyzer_lib",
         "//tensorflow/python/debug/lib:grpc_debug_test_server",
