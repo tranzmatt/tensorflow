@@ -25,7 +25,7 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"  // gloop
+#include "xla/tsl/platform/status_macros.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/pjrt/compiled_memory_stats.h"
 #include "xla/service/buffer_assignment.h"
@@ -134,27 +134,6 @@ LegacyGpuAotCompilationResult::GetCompiledMemoryStats() const {
   memory_stats.indefinite_allocations = ComputeIndefiniteAllocationsInBytes(
       proto_.buffer_assignment(), /*memory_color=*/0);
   return memory_stats;
-}
-
-absl::StatusOr<std::string> EarlyExitCompilationResult::SerializeAsString()
-    const {
-  return Unavailable(
-      "SerializeAsString() is not supported by EarlyExitCompilationResult.");
-}
-
-absl::StatusOr<std::unique_ptr<Executable>>
-EarlyExitCompilationResult::LoadExecutable(
-    se::Platform::Id platform_id,
-    const se::DeviceDescription& device_description) && {
-  return Unavailable(
-      "LoadExecutable() is not supported by EarlyExitCompilationResult.");
-}
-
-absl::StatusOr<CompiledMemoryStats>
-EarlyExitCompilationResult::GetCompiledMemoryStats() const {
-  return absl::UnavailableError(
-      "GetCompiledMemoryStats() is not supported by "
-      "EarlyExitCompilationResult.");
 }
 
 }  // namespace gpu

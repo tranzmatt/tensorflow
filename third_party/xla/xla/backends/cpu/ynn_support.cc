@@ -156,6 +156,77 @@ bool IsReshapeOpSupportedByYnn(const HloInstruction* hlo) {
   return ShapeUtil::ReshapeIsBitcast(input->shape(), hlo->shape());
 }
 
+bool IsTransposeOpSupportedByYnn(const HloInstruction* hlo) {
+  CHECK_EQ(hlo->opcode(), HloOpcode::kTranspose);
+  if (!YnnType(hlo->shape().element_type()).ok()) {
+    return false;
+  }
+  const HloInstruction* input = hlo->operand(0);
+  if (hlo->shape().element_type() != input->shape().element_type()) {
+    return false;
+  }
+  return IsLayoutSupportedByYnn(hlo->shape()) &&
+         IsLayoutSupportedByYnn(input->shape());
+}
+
+bool IsBroadcastOpSupportedByYnn(const HloInstruction* hlo) {
+  CHECK_EQ(hlo->opcode(), HloOpcode::kBroadcast);
+  if (!YnnType(hlo->shape().element_type()).ok()) {
+    return false;
+  }
+  const HloInstruction* input = hlo->operand(0);
+  if (!IsLayoutSupportedByYnn(hlo->shape()) ||
+      !IsLayoutSupportedByYnn(input->shape())) {
+    return false;
+  }
+
+  // YNNPACK's broadcast operation can insert new dimensions, but not transpose.
+  // HLO broadcast is more general. For now, let's only support "simple"
+  // broadcasts that can be achieved by reshape + broadcast in YNNPACK. A
+  // broadcast is "simple" if it preserves the relative order of operand
+  // dimensions.
+  auto dimensions = hlo->dimensions();
+  for (int i = 1; i < dimensions.size(); ++i) {
+    if (dimensions[i] <= dimensions[i - 1]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsConcatenateOpSupportedByYnn(const HloInstruction* hlo) {
+  CHECK_EQ(hlo->opcode(), HloOpcode::kConcatenate);
+  if (!YnnType(hlo->shape().element_type()).ok()) {
+    return false;
+  }
+  if (!IsLayoutSupportedByYnn(hlo->shape())) {
+    return false;
+  }
+  for (const HloInstruction* operand : hlo->operands()) {
+    if (hlo->shape().element_type() != operand->shape().element_type()) {
+      return false;
+    }
+    if (!IsLayoutSupportedByYnn(operand->shape())) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsSliceOpSupportedByYnn(const HloInstruction* hlo) {
+  CHECK_EQ(hlo->opcode(), HloOpcode::kSlice);
+  if (!YnnType(hlo->shape().element_type()).ok()) {
+    return false;
+  }
+  const HloInstruction* input = hlo->operand(0);
+  if (!IsLayoutSupportedByYnn(hlo->shape()) ||
+      !IsLayoutSupportedByYnn(input->shape())) {
+    return false;
+  }
+
+  return hlo->shape().element_type() == input->shape().element_type();
+}
+
 bool IsConstantSupportedByYnn(const HloInstruction* hlo) {
   CHECK(hlo->IsConstant());
 
@@ -171,14 +242,15 @@ bool IsElementwiseOpSupportedByYnn(const HloInstruction* hlo) {
   // In XLA IsElementwise is true for constants.
   CHECK(!hlo->IsConstant());
 
-  if (!YnnType(hlo->shape().element_type()).ok()) {
+  const PrimitiveType ty = hlo->shape().element_type();
+  if (ty == F64 || !YnnType(ty).ok()) {
     return false;
   }
 
-  if (!std::all_of(hlo->operands().begin(), hlo->operands().end(),
-                   [](const HloInstruction* op) {
-                     return YnnType(op->shape().element_type()).ok();
-                   })) {
+  if (absl::c_any_of(hlo->operands(), [](const HloInstruction* op) {
+        const PrimitiveType op_ty = op->shape().element_type();
+        return op_ty == F64 || !YnnType(op_ty).ok();
+      })) {
     return false;
   }
 
@@ -415,6 +487,12 @@ bool IsConvolutionOpSupportedByYnn(const HloInstruction* instr) {
   const Shape& lhs_shape = conv->operand(0)->shape();
   const Shape& rhs_shape = conv->operand(1)->shape();
   const Shape& out_shape = conv->shape();
+
+  if (!IsLayoutSupportedByYnn(lhs_shape) ||
+      !IsLayoutSupportedByYnn(rhs_shape) ||
+      !IsLayoutSupportedByYnn(out_shape)) {
+    return false;
+  }
 
   PrimitiveType lhs_dtype = lhs_shape.element_type();
   PrimitiveType rhs_dtype = rhs_shape.element_type();

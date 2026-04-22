@@ -47,6 +47,7 @@ limitations under the License.
 #include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
 #include "absl/types/span.h"
+#include "xla/tsl/platform/status_macros.h"
 #include "third_party/gpus/cuda/include/cuda.h"
 #include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #include "third_party/gpus/cuda/include/driver_types.h"
@@ -113,7 +114,6 @@ limitations under the License.
 #include "tsl/platform/fingerprint.h"
 #include "tsl/platform/numa.h"
 #include "tsl/platform/numbers.h"
-#include "xla/tsl/platform/status_macros.h"
 
 namespace stream_executor {
 namespace gpu {
@@ -252,7 +252,7 @@ absl::StatusOr<CUfunction> GetModuleFunction(Context* context, CUmodule module,
   TF_RETURN_IF_ERROR(cuda::ToStatus(
       cuModuleGetFunction(&function, module, kernel_name),
       absl::StrCat(xla::XlaFormatDevice(context->device_ordinal()),
-                   "Failed to get module function")));
+                   "Failed to get module function ", kernel_name)));
   return function;
 }
 
@@ -292,12 +292,11 @@ absl::StatusOr<int> GetDeviceAttribute(CUdevice_attribute attribute,
 
 // Returns the name of the device.
 absl::StatusOr<std::string> GetDeviceName(CUdevice device) {
-  static const size_t kCharLimit = 64;
-  absl::InlinedVector<char, 4> chars(kCharLimit);
+  std::array<char, 64> chars;
   TF_RETURN_IF_ERROR(
-      cuda::ToStatus(cuDeviceGetName(chars.begin(), kCharLimit - 1, device),
+      cuda::ToStatus(cuDeviceGetName(chars.begin(), chars.size() - 1, device),
                      "Failed to get device name"));
-  chars[kCharLimit - 1] = '\0';
+  chars[chars.size() - 1] = '\0';
   return chars.begin();
 }
 
@@ -427,7 +426,7 @@ absl::Status EnablePeerAccess(Context* from, Context* to) {
 
   ScopedActivateContext activated{from};
   CUresult result = cuCtxEnablePeerAccess(
-      tensorflow::down_cast<CudaContext*>(to)->context(), 0 /* = flags */);
+      absl::down_cast<CudaContext*>(to)->context(), 0 /* = flags */);
   if (result != CUDA_SUCCESS &&
       result != CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED) {
     return absl::InternalError(
@@ -734,7 +733,7 @@ absl::StatusOr<xla::gpu::GpuCollectives*> GetGpuCollectives(
   std::unique_ptr<ActivateContext> activation = executor->Activate();
   TF_ASSIGN_OR_RETURN(xla::Collectives * collectives,
                       xla::CollectivesRegistry::Default("gpu"));
-  return tsl::down_cast<xla::gpu::GpuCollectives*>(collectives);
+  return absl::down_cast<xla::gpu::GpuCollectives*>(collectives);
 }
 
 CudaExecutor::VmmMemoryHandle::~VmmMemoryHandle() { CHECK_OK(Release()); }

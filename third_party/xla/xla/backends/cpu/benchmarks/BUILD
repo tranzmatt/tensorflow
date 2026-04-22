@@ -69,7 +69,7 @@ cc_library(
         "//xla/tools:run_hlo_module_proto_cc",
         "//xla/tsl/platform:env",
         "//xla/tsl/platform:errors",
-        "//xla/tsl/platform:gloop_status_macros",
+        "//xla/tsl/platform:status_macros",
         "//xla/tsl/platform:statusor",
         "//xla/tsl/platform:test_benchmark",
         "@com_google_absl//absl/base:nullability",
@@ -183,12 +183,13 @@ xla_cc_test(
 )
 
 xla_cc_test(
-    name = "rms_norm_benchmark_test",
-    srcs = ["rms_norm_benchmark_test.cc"],
+    name = "norm_benchmark_test",
+    srcs = ["norm_benchmark_test.cc"],
     deps = [
         ":aot_benchmark_helper",
         ":hlo_benchmark_runner",
         "//xla:literal",
+        "//xla:literal_util",
         "//xla:shape_util",
         "//xla:xla_data_proto_cc",
         "//xla/hlo/ir:hlo",
@@ -197,6 +198,7 @@ xla_cc_test(
         "//xla/tsl/platform:env",
         "//xla/tsl/platform:statusor",
         "//xla/tsl/platform:test",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",

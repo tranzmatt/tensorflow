@@ -31,7 +31,7 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "xla/tsl/platform/status_macros.h"  // gloop
+#include "xla/tsl/platform/status_macros.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Function.h"
@@ -354,7 +354,7 @@ absl::StatusOr<FusionEmissionResult> MlirKernelFusion::Emit(
                                       ir_emitter_context.gpu_device_info());
             return entry;
           });
-  TF_ASSIGN_OR_RETURN(const KernelReuseCache::Entry* entry, status_or_entry);
+  ASSIGN_OR_RETURN(const KernelReuseCache::Entry* entry, status_or_entry);
 
   if (cached) {
     VLOG(3) << "Reuse: " << fusion.name() << " -> " << entry->kernel_name;
@@ -362,7 +362,7 @@ absl::StatusOr<FusionEmissionResult> MlirKernelFusion::Emit(
 
   FusionEmissionResult result;
   result.module = std::move(module);
-  result.thunks.emplace_back(std::make_unique<KernelThunk>(
+  result.thunks = ThunkSequence::Of(std::make_unique<KernelThunk>(
       Thunk::ThunkInfo::WithProfileAnnotation(
           &fusion, ir_emitter_context.GetNextThunkId()),
       entry->kernel_name, args, launch_dims, entry->cluster_dim,

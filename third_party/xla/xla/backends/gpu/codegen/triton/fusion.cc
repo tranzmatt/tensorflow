@@ -28,7 +28,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"  // gloop
+#include "xla/tsl/platform/status_macros.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -118,12 +118,11 @@ TritonFusion::GenerateTritonKernelAndWrapper(
 absl::StatusOr<FusionEmissionResult> TritonFusion::Emit(
     IrEmitterContext& ir_emitter_context,
     const HloFusionInstruction& fusion) const {
-  TF_ASSIGN_OR_RETURN(EmitResult kernel_and_module,
-                      Emit(ir_emitter_context, fusion, nullptr, {}));
-  FusionEmissionResult result;
-  result.thunks.push_back(std::move(kernel_and_module.kernel_thunk));
-  result.module = std::move(kernel_and_module.llvm_module);
-  return result;
+  ASSIGN_OR_RETURN(EmitResult kernel_and_module,
+                   Emit(ir_emitter_context, fusion, nullptr, {}));
+  return FusionEmissionResult{
+      ThunkSequence::Of(std::move(kernel_and_module.kernel_thunk)),
+      std::move(kernel_and_module.llvm_module)};
 }
 
 absl::StatusOr<TritonFusion::EmitResult> TritonFusion::Emit(

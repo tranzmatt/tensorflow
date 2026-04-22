@@ -32,5 +32,8 @@ common_patch_list = [
     "//third_party/triton:common/llvm_cl893899241.patch",
     "//third_party/triton:common/stage_and_cluster_map.patch",
     "//third_party/triton:common/llvm_cl895542516.patch",
+    "//third_party/triton:common/assert_fail.patch",
+    "//third_party/triton:common/llvm_cl900404532.patch",
+    "//third_party/triton:common/cherry-pick-f43dff6f.patch",
     # Add new patches just above this line
 ]

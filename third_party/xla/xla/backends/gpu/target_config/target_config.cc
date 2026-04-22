@@ -21,6 +21,7 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "xla/tsl/platform/status_macros.h"
 #include "google/protobuf/text_format.h"
 #include "xla/backends/gpu/target_config/embed_gpu_specs.h"
 #include "xla/status_macros.h"
@@ -32,7 +33,6 @@ limitations under the License.
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/xla.pb.h"
-#include "xla/tsl/platform/status_macros.h"
 
 namespace xla::gpu {
 
@@ -153,7 +153,7 @@ absl::StatusOr<GpuTargetConfig> GpuTargetConfig::FromProto(
 
 se::GpuTargetConfigProto GpuTargetConfig::ToProto() const {
   se::GpuTargetConfigProto proto;
-  *proto.mutable_gpu_device_info() = device_description.ToGpuProto();
+  *proto.mutable_gpu_device_info() = device_description.ToProto();
   proto.set_platform_name(platform_name);
   *proto.mutable_dnn_version_info() = dnn_version_info.ToProto();
   se::RuntimeVersionProto runtime_version_proto;

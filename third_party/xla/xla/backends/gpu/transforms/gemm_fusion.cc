@@ -666,8 +666,7 @@ HlosAndRequirements FuseDotOutput(
     HloComputation::Builder& builder,            // append
     std::vector<HloInstruction*>& fusion_params  // append
 ) {
-  const auto context =
-      FusionContext::FromDotOutput(dot, /*split_k=*/1, requirements);
+  const auto context = FusionContext::FromDotOutput(dot, requirements);
   return FuseTowardUsers(dot, fused_dot, context.dim_orders().at(&dot),
                          gpu_version, context.dot_properties(),
                          context.requirements(), builder, fusion_params);
@@ -718,7 +717,7 @@ absl::StatusOr<Decision> CreateDotFusion(
     HloInstruction** fusion_output_ptr) {
   VLOG(5) << dot.ToString();
   if (CodegenDecision is_supported =
-          legacy_triton::IsTritonSupportedInstruction(dot, gpu_version);
+          IsTritonSupportedInstruction(dot, gpu_version);
       !is_supported) {
     VLOG(3) << is_supported.Explain();
     return Decision::Deny(is_supported.Explain());
@@ -994,6 +993,9 @@ absl::StatusOr<bool> RunOnComputation(
 
 bool ShouldTritonHandleGEMM(HloDotInstruction& dot,
                             const se::GpuComputeCapability& gpu_version) {
+  if (!EnsureTritonSupportsComputeCapability(gpu_version).ok()) {
+    return false;
+  }
   std::vector<HloInstruction*> fusion_inputs;
   HloComputation::Builder builder("disposable");
   return CreateDotFusion(dot, gpu_version, builder, fusion_inputs,

@@ -197,6 +197,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_dump_hlo_as_html(false);
   opts.set_xla_dump_fusion_visualization(false);
   opts.set_xla_dump_include_timestamp(false);
+  opts.set_xla_dump_hlo_to_subfolder(false);
   opts.set_xla_dump_max_hlo_modules(-1);
   opts.set_xla_dump_module_metadata(false);
   opts.set_xla_dump_hlo_as_long_text(true);
@@ -272,6 +273,8 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_collective_combine_threshold_count(
       kDefaultCollectiveCombineThresholdCount);
   opts.set_xla_gpu_enable_all_gather_combine_by_dim(false);
+  opts.set_xla_gpu_collective_permute_mode(
+      DebugOptions::COLLECTIVES_PRIVATE_MEMORY);
   opts.set_xla_gpu_enable_reduce_scatter_combine_by_dim(false);
   opts.set_xla_gpu_enable_approx_costly_collectives(false);
 
@@ -457,7 +460,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_enable_scatter_determinism_expander(false);
   opts.set_xla_gpu_unsupported_enable_all_reduce_decomposer(false);
   opts.set_xla_gpu_unsupported_enable_ragged_all_to_all_decomposer(false);
-  opts.set_xla_gpu_unsupported_use_all_reduce_one_shot_kernel(false);
+  opts.set_xla_gpu_unsupported_use_all_reduce_one_shot_kernel(true);
   opts.set_xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel(true);
   opts.set_xla_gpu_experimental_enable_fusion_autotuner(true);
   opts.set_xla_gpu_experimental_max_unroll_factor(32);
@@ -726,6 +729,28 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
         }
         debug_options->set_xla_gpu_command_buffer_update_mode(mode);
         return true;
+      };
+
+  // Generic setter for CollectivesMode enum fields. Accepts case-insensitive
+  // values: "private", "symmetric", "peer".
+  auto collectives_mode_setter_for =
+      [debug_options](
+          void (DebugOptions::*member_setter)(DebugOptions::CollectivesMode)) {
+        return [debug_options, member_setter](const std::string& value) {
+          DebugOptions::CollectivesMode mode;
+          std::string lower = absl::AsciiStrToLower(value);
+          if (lower == "private") {
+            mode = DebugOptions::COLLECTIVES_PRIVATE_MEMORY;
+          } else if (lower == "symmetric") {
+            mode = DebugOptions::COLLECTIVES_SYMMETRIC_MEMORY;
+          } else if (lower == "peer") {
+            mode = DebugOptions::COLLECTIVES_PEER_MEMORY;
+          } else {
+            return false;
+          }
+          (debug_options->*member_setter)(mode);
+          return true;
+        };
       };
 
   // Custom "sub-parser" lambda for `xla_gpu_command_buffer_scheduling_mode`.
@@ -1538,6 +1563,12 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
                 bool_setter_for(&DebugOptions::set_xla_dump_include_timestamp),
                 debug_options->xla_dump_include_timestamp(),
                 "If specified, includes a timestamp in the dumped filenames."));
+  flag_list->push_back(tsl::Flag(
+      "xla_dump_hlo_to_subfolder",
+      bool_setter_for(&DebugOptions::set_xla_dump_hlo_to_subfolder),
+      debug_options->xla_dump_hlo_to_subfolder(),
+      "If true, dumps HLO modules in a subfolder titled the HLO module "
+      "name in the directory specified by --xla_dump_to."));
   flag_list->push_back(
       tsl::Flag("xla_dump_max_hlo_modules",
                 int32_setter_for(&DebugOptions::set_xla_dump_max_hlo_modules),
@@ -2423,6 +2454,13 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
       "Split collective-permute into connected-component replica groups "
       "instead of one giant clique."));
   flag_list->push_back(
+      tsl::Flag("xla_gpu_collective_permute_mode",
+                collectives_mode_setter_for(
+                    &DebugOptions::set_xla_gpu_collective_permute_mode),
+                std::string("private"),
+                "Memory mode for collective-permute: private, symmetric, peer. "
+                "See CollectivesMode for details."));
+  flag_list->push_back(
       tsl::Flag("xla_gpu_use_inprocess_lld",
                 bool_setter_for(&DebugOptions::set_xla_gpu_use_inprocess_lld),
                 debug_options->xla_gpu_use_inprocess_lld(),
@@ -3132,6 +3170,21 @@ xla::DebugOptions GetDebugOptionsFromFlags() {
                                      /*reset_envvar=*/true);
   }
   return *flag_values;
+}
+
+DebugOptions GetDebugOptionsFromProtoAndFlags(
+    DebugOptions* proto_debug_options) {
+  if (proto_debug_options != nullptr) {
+    DebugOptions debug_options = *proto_debug_options;
+    // Apply overrides from XLA_FLAGS environment variable.
+    std::vector<tsl::Flag> flag_list;
+    MakeDebugOptionsFlags(&flag_list, &debug_options);
+    ParseFlagsFromEnvAndDieIfUnknown("XLA_FLAGS", flag_list,
+                                     /*reset_envvar=*/true);
+    return debug_options;
+  }
+
+  return GetDebugOptionsFromFlags();
 }
 
 // LINT.IfChange(get_flag_status)

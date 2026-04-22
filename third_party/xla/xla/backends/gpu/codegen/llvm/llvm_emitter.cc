@@ -36,6 +36,7 @@ limitations under the License.
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "xla/tsl/platform/status_macros.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Argument.h"
@@ -95,7 +96,6 @@ limitations under the License.
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/fingerprint.h"
-#include "xla/tsl/platform/status_macros.h"
 
 namespace xla::gpu {
 namespace {
@@ -750,8 +750,9 @@ void AppendGlobalConstant(llvm::Module* module, int64_t num_elements,
                                                 content.span().size()));
   }();
 
-  // Explicitly set global addrspace for SPIR backend.
-  int addrspace = llvm::Triple(module->getTargetTriple()).isSPIR() ? 1 : 0;
+  // Explicitly set global addrspace for SPIR-V backend.
+  int addrspace =
+      llvm::Triple(module->getTargetTriple()).isSPIROrSPIRV() ? 1 : 0;
   // These globals will be looked up by name by GpuExecutable so we need to
   // give them an external linkage.  Not all of their uses are visible in
   // the LLVM IR so we can't give then a linkage that merely preserves their
