@@ -961,8 +961,10 @@ xla_test(
         "@llvm-project//mlir:IR",
     ] + if_cuda_is_configured([
         ":cublas",
+        ":cublaslt",
     ]) + if_rocm_is_configured([
         ":rocblas",
+        ":hipblaslt",
     ]),
 )
 

@@ -416,6 +416,8 @@ xla_test(
     backend_tags = {
         # TODO(b/445172709): Re-enable once fixed.
         "b200": ["broken"],
+        "gb200": ["broken"],  # TODO(b/505574653): re-enable when fixed.
+        "gb300": ["broken"],  # TODO(b/505574653): re-enable when fixed.
     },
     backends = ["gpu"],
     use_legacy_runtime = True,
@@ -1201,7 +1203,6 @@ xla_test(
     backend_tags = {
         "gpu": [
             "multi_gpu",
-            "no_oss",
         ],
     },
     backends = ["gpu"],
@@ -1234,7 +1235,6 @@ xla_test(
     backend_tags = {
         "gpu": [
             "multi_gpu",
-            "no_oss",
         ],
     },
     backends = [
@@ -1307,6 +1307,8 @@ xla_test(
         "//xla:shape_util",
         "//xla:types",
         "//xla:xla_data_proto_cc",
+        "//xla:xla_proto_cc",
+        "//xla/backends/gpu/collectives:gpu_collectives",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/parser:hlo_parser",
         "//xla/hlo/testlib:pattern_matcher_gmock",
@@ -1546,7 +1548,6 @@ xla_test(
     backend_tags = {
         "gpu": [
             "multi_gpu",
-            "no_oss",
         ],
     },
     backends = ["gpu"],
@@ -1577,8 +1578,8 @@ xla_test(
         "gpu",
     ],
     deps = [
+        ":hlo_pjrt_gpu_test_base",
         "//xla:error_spec",
-        "//xla/backends/gpu/tests:hlo_pjrt_gpu_test_base",
         "//xla/hlo/testlib:test",
         "//xla/tests:hlo_pjrt_interpreter_reference_mixin",
         "//xla/tests:xla_internal_test_main",

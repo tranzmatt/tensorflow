@@ -567,6 +567,7 @@ cc_library(
         "//xla/stream_executor:stream_executor_h",
         "//xla/stream_executor/platform:initialize",
         "//xla/tsl/cuda:cudnn",
+        "//xla/tsl/cuda:nvrtc",
         "//xla/tsl/platform:errors",
         "//xla/tsl/platform:statusor",
         "//xla/tsl/protobuf:dnn_proto_cc",
@@ -1825,6 +1826,8 @@ xla_test(
         "gpu": [
             "multi_gpu",
         ],
+        "gb200": ["broken"],  # TODO(b/505963304): re-enable when fixed.
+        "gb300": ["broken"],  # TODO(b/505963304): re-enable when fixed.
     },
     backends = ["gpu"],
     tags = ["cuda-only"],
@@ -1833,6 +1836,7 @@ xla_test(
         ":cuda_executor_multigpu_test_kernels",
         ":cuda_platform",
         "//xla/stream_executor:device_address",
+        "//xla/stream_executor:memory_space",
         "//xla/stream_executor:platform",
         "//xla/stream_executor:platform_manager",
         "//xla/stream_executor:stream_executor_h",

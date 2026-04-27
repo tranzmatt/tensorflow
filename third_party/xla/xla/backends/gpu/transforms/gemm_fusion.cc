@@ -590,9 +590,6 @@ HlosAndRequirements FuseTowardUsers(
     return existing_hlos_and_requirements;
   }
   const HloInstruction& user = *hlo.users()[0];
-  if (!legacy_triton::IsDistributiveOverAddition(user)) {
-    return existing_hlos_and_requirements;
-  }
 
   // Get the dim orders for the user.
   auto opt_user_result = GetUserDimOrdersAndCombinedReqsIfProfitable(
@@ -832,15 +829,8 @@ class GemmFusionVisitor : public DfsHloRewriteVisitor {
         const Decision decision,
         CreateDotFusion(*Cast<HloDotInstruction>(dot), gpu_version_, builder,
                         fusion_inputs, &fusion_output));
-    if (!decision.CanFuse()) {
+    if (!decision.WantToFuse()) {
       VLOG(3) << "Not fusing: " << decision.Explain();
-      return absl::OkStatus();
-    }
-    // If a GEMM requiring padding for cuBLAS is encountered here this
-    // happened because earlier ShouldTritonHandleGEMM() accepted it and padding
-    // was skipped. Accept it ignoring profitability checks.
-    if (!CublasRequiresPadding(*Cast<HloDotInstruction>(dot), gpu_version_) &&
-        !decision.WantToFuse()) {
       return absl::OkStatus();
     }
 
@@ -990,18 +980,6 @@ absl::StatusOr<bool> RunOnComputation(
 }
 
 }  // namespace
-
-bool ShouldTritonHandleGEMM(HloDotInstruction& dot,
-                            const se::GpuComputeCapability& gpu_version) {
-  if (!EnsureTritonSupportsComputeCapability(gpu_version).ok()) {
-    return false;
-  }
-  std::vector<HloInstruction*> fusion_inputs;
-  HloComputation::Builder builder("disposable");
-  return CreateDotFusion(dot, gpu_version, builder, fusion_inputs,
-                         /*fusion_output_ptr=*/nullptr)
-      ->WantToFuse();
-}
 
 absl::StatusOr<bool> GemmFusion::RunImpl(
     HloModule* module,
