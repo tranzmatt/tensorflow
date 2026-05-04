@@ -287,7 +287,7 @@ std::optional<stream_executor::GpuTargetConfigProto> GetTargetConfigForDevices(
   }
   for (const PjRtDevice* device : devices) {
     se::StreamExecutor* executor =
-        tensorflow::down_cast<const TfrtGpuDevice*>(device)->executor();
+        absl::down_cast<const TfrtGpuDevice*>(device)->executor();
     if (executor != nullptr) {
       return xla::Compiler::GpuTargetConfig(executor).ToProto();
     }
@@ -615,7 +615,7 @@ std::vector<std::unique_ptr<PjRtMemorySpace>> InitializeMemorySpaces(
   for (auto* device : addressable_devices) {
     // Use the device id to construct a globally unique memory space id. We do
     // not promise that memory space ids and device ids are the same.
-    TfrtGpuDevice* gpu_device = tensorflow::down_cast<TfrtGpuDevice*>(device);
+    TfrtGpuDevice* gpu_device = absl::down_cast<TfrtGpuDevice*>(device);
     // Initialize the default memory space.
     const int global_device_id = gpu_device->global_device_id().value();
     auto memory_space =
@@ -625,7 +625,7 @@ std::vector<std::unique_ptr<PjRtMemorySpace>> InitializeMemorySpaces(
   }
   const int basePinnedId = global_device_count;
   for (auto* device : addressable_devices) {
-    TfrtGpuDevice* gpu_device = tensorflow::down_cast<TfrtGpuDevice*>(device);
+    TfrtGpuDevice* gpu_device = absl::down_cast<TfrtGpuDevice*>(device);
     const int global_device_id = gpu_device->global_device_id().value();
     auto pinned = std::make_unique<PinnedHostMemorySpace>(
         basePinnedId + global_device_id, device);
@@ -641,7 +641,7 @@ std::vector<std::unique_ptr<PjRtMemorySpace>> InitializeMemorySpaces(
   return memory_spaces;
 }
 
-absl::StatusOr<std::unique_ptr<tsl::Allocator>> CreateAllocatorForDevice(
+absl::StatusOr<std::shared_ptr<tsl::Allocator>> CreateAllocatorForDevice(
     se::StreamExecutor* executor, const GpuAllocatorConfig& allocator_config) {
   switch (allocator_config.kind) {
     case GpuAllocatorConfig::Kind::kCudaAsync:
@@ -721,7 +721,7 @@ absl::StatusOr<MaybeOwning<se::DeviceAddressAllocator>> CreateDeviceAllocator(
     // The stream in the allocator will be used during compilation.
     se::Stream* stream = device->stream();
 
-    std::unique_ptr<tsl::Allocator> allocator;
+    std::shared_ptr<tsl::Allocator> allocator;
     if ((effective_config.kind == GpuAllocatorConfig::Kind::kDefault ||
          effective_config.kind == GpuAllocatorConfig::Kind::kBFC) &&
         effective_config.preallocate) {
@@ -753,11 +753,11 @@ absl::StatusOr<MaybeOwning<se::DeviceAddressAllocator>> CreateDeviceAllocator(
       TF_ASSIGN_OR_RETURN(allocator,
                           CreateAllocatorForDevice(executor, effective_config));
     }
-    allocators.emplace_back(
-        std::move(allocator), stream,
-        /*memory_space=*/
-        static_cast<int>(stream_executor::MemorySpace::kDevice),
-        executor->device_ordinal(), executor->GetPlatform());
+    allocators.push_back(
+        {std::move(allocator), stream,
+         /*memory_space=*/
+         static_cast<int>(stream_executor::MemorySpace::kDevice),
+         executor->device_ordinal(), executor->GetPlatform()});
 
     TF_ASSIGN_OR_RETURN(
         auto collective_bfc_allocator,
@@ -765,15 +765,15 @@ absl::StatusOr<MaybeOwning<se::DeviceAddressAllocator>> CreateDeviceAllocator(
             executor,
             /*memory_fraction=*/1.0 - effective_config.memory_fraction,
             effective_config.collective_memory_size));
-    allocators.emplace_back(std::move(collective_bfc_allocator), stream,
-                            /*memory_space=*/1, executor->device_ordinal(),
-                            executor->GetPlatform());
+    allocators.push_back({std::move(collective_bfc_allocator), stream,
+                          /*memory_space=*/1, executor->device_ordinal(),
+                          executor->GetPlatform()});
 
     TF_ASSIGN_OR_RETURN(auto host_allocator, GetGpuHostAllocator(executor));
-    allocators.emplace_back(
-        std::move(host_allocator), stream,
-        /*memory_space=*/static_cast<int>(stream_executor::MemorySpace::kHost),
-        executor->device_ordinal(), executor->GetPlatform());
+    allocators.push_back(
+        {std::move(host_allocator), stream,
+         /*memory_space=*/static_cast<int>(stream_executor::MemorySpace::kHost),
+         executor->device_ordinal(), executor->GetPlatform()});
   }
   return MaybeOwning<se::DeviceAddressAllocator>(
       std::make_unique<se::MultiDeviceAdapter>(xla_client->platform(),
@@ -987,7 +987,7 @@ absl::StatusOr<DeviceTopologyPair> BuildDistributedDevices(
   TF_ASSIGN_OR_RETURN(xla::Collectives * collectives,
                       xla::CollectivesRegistry::Default("gpu"));
   xla::gpu::GpuCollectives* gpu_collectives =
-      tsl::down_cast<xla::gpu::GpuCollectives*>(collectives);
+      absl::down_cast<gpu::GpuCollectives*>(collectives);
 
   if (gpu_collectives == nullptr) {
     return absl::InternalError("Failed to get GPU collectives");
