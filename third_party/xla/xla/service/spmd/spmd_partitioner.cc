@@ -62,6 +62,7 @@ limitations under the License.
 #include "xla/layout_util.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
+#include "xla/primitive_util.h"
 #include "xla/protobuf_util.h"
 #include "xla/service/call_graph.h"
 #include "xla/service/collective_ops_utils.h"
@@ -2039,15 +2040,7 @@ PatternMatchMergeOrSplitSharding(const Shape& base_shape,
     return std::nullopt;
   }
   if (source.HasPartialReplication()) {
-    auto get_repl_factor = [](const HloSharding& s) {
-      if (s.UseNamedShardingLeaf()) {
-        int64_t sharded_dims_product =
-            absl::c_accumulate(s.dimensions(), 1LL, std::multiplies<int64_t>());
-        return s.num_devices() / sharded_dims_product;
-      }
-      return s.dimensions()[s.TiledDataRank()];
-    };
-    if (get_repl_factor(source) != get_repl_factor(target)) {
+    if (source.ReplicationFactor() != target.ReplicationFactor()) {
       return std::nullopt;
     }
   }
@@ -2104,24 +2097,22 @@ PatternMatchMergeOrSplitSharding(const Shape& base_shape,
 // targets instead.
 std::optional<HloSharding> PatternMatchPartiallyReplicateDim(
     const HloSharding& source, const HloSharding& target) {
-  if (!target.ReplicateOnLastTileDim()) {
+  if (!target.HasPartialReplication()) {
     return std::nullopt;
   }
-  const int64_t target_replicated_dim = target.SubgroupReplicationDim();
-  const int64_t source_replicated_size =
-      source.HasPartialReplication()
-          ? source.dimension(source.SubgroupReplicationDim())
-          : 1;
-  CHECK_NE(target_replicated_dim, -1) << "Expected replicated dim";
+
+  const int64_t target_replicated_size = target.ReplicationFactor();
+  const int64_t source_replicated_size = source.ReplicationFactor();
+
   for (int i = 0; i < source.TiledDataRank(); ++i) {
     if (source.dimension(i) == 1 ||
         source.dimension(i) * source_replicated_size !=
-            target.dimension(target_replicated_dim)) {
+            target_replicated_size) {
       continue;
     }
-    auto replicated_sharding =
-        hlo_sharding_util::PartiallyReplicateTiledShardingOnDims(source, {i});
-    return replicated_sharding;
+
+    return hlo_sharding_util::PartiallyReplicateTiledShardingOnDims(source,
+                                                                    {i});
   }
   return std::nullopt;
 }
@@ -2183,8 +2174,8 @@ std::optional<PartitionedHlo> PartitionedHlo::TryComplexReshardHandling(
   VLOG(5) << "Trying to split complicated reshard: " << sharding().ToString()
           << " to " << target.ToString();
   const bool is_source_partially_replicated =
-      sharding().ReplicateOnLastTileDim();
-  const bool is_target_partially_replicated = target.ReplicateOnLastTileDim();
+      sharding().HasPartialReplication();
+  const bool is_target_partially_replicated = target.HasPartialReplication();
   if (auto reshape = PatternMatchMergeOrSplitSharding(this->base_shape(),
                                                       sharding(), target)) {
     auto& [before_sharding, new_reshaped_sharding, source_dim] = *reshape;
@@ -2226,7 +2217,9 @@ std::optional<PartitionedHlo> PartitionedHlo::TryComplexReshardHandling(
     return final_reshard;
   }
   if (is_source_partially_replicated && !is_target_partially_replicated) {
-    const int64_t partial_repl_amount = sharding().dimensions().back();
+    const int64_t replication_dim = sharding().SubgroupReplicationDim();
+    const int64_t partial_repl_amount =
+        sharding().dimensions()[replication_dim];
     int64_t first_different_dimension = -1;
     // Trying to match conditions like [..,X,..,Z,..,Y] last_tile_dim_replicate
     // to [..,Y,..,Z,..,X,..], where Y in the source is partially replicated,
@@ -2248,7 +2241,8 @@ std::optional<PartitionedHlo> PartitionedHlo::TryComplexReshardHandling(
             << sharding().ToString();
     std::vector<int64_t> transpose_dims(sharding().num_dimensions(), 0);
     absl::c_iota(transpose_dims, 0);
-    std::swap(transpose_dims[first_different_dimension], transpose_dims.back());
+    std::swap(transpose_dims[first_different_dimension],
+              transpose_dims[replication_dim]);
     auto intermediate_sharding =
         hlo_sharding_util::TransposeSharding(sharding(), transpose_dims);
     auto intermediate_reshard = Reshard(intermediate_sharding);
@@ -3722,14 +3716,25 @@ absl::Status SpmdPartitioningVisitor::HandleConstant(HloInstruction* hlo) {
     return DefaultAction(hlo);
   }
 
-  SetPartitionedHlo(hlo, [&]() {
-    auto shard_shape = MakePartitionedShape(hlo->shape(), hlo->sharding());
-    std::vector<int64_t> start_indices(hlo->shape().dimensions().size(), 0);
-    auto constant = b_.AddInstruction(HloInstruction::CreateConstant(
-        literal.Slice(start_indices, shard_shape.dimensions())));
-    *constant->mutable_shape() = shard_shape;
-    return constant;
-  });
+  if (hlo->sharding().IsReplicatedOrSingleDevice()) {
+    SetPartitionedHlo(hlo, b_.AddInstruction(hlo->Clone()));
+    return absl::OkStatus();
+  }
+
+  TF_RET_CHECK(literal.IsAllFirst());
+  auto shard_shape = MakePartitionedShape(hlo->shape(), hlo->sharding());
+  TF_ASSIGN_OR_RETURN(Literal shard_literal, Literal::Make(shard_shape));
+  primitive_util::ArrayTypeSwitch(
+      [&](auto type) {
+        using NativeT = primitive_util::NativeTypeOf<type>;
+        shard_literal.PopulateWithValue(literal.GetFirstElement<NativeT>());
+      },
+      literal.shape().element_type());
+  auto constant = b_.AddInstruction(
+      HloInstruction::CreateConstant(std::move(shard_literal)));
+  *constant->mutable_shape() = shard_shape;
+
+  SetPartitionedHlo(hlo, constant);
   return absl::OkStatus();
 }
 
@@ -6911,7 +6916,11 @@ void SpmdPartitioningVisitor::SetPartitionedHlo(
     // Skip manual sharding because our toolings currently don't support it.
     // TODO(b/444750067): handle manual sharding.
     partitioned_hlo.hlo()->set_original_value(nullptr);
-  } else if (!sharding.IsReplicated()) {
+  } else if (sharding.IsReplicated()) {
+    // Propagate the original value because replicated means all partitions have
+    // the same value.
+    partitioned_hlo.hlo()->set_original_value(hlo->original_value());
+  } else {
     // Adds recovery computation to the original value recovery table.
     auto* module = const_cast<HloModule*>(hlo->parent()->parent());
     auto build_recovery_computation =

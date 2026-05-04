@@ -312,6 +312,7 @@ xla_cc_test(
         "//xla/stream_executor:platform_manager",
         "//xla/stream_executor:stream",
         "//xla/stream_executor:stream_executor_h",
+        "//xla/stream_executor/cuda:cuda_compute_capability",
         "//xla/stream_executor/cuda:cuda_platform",
         "//xla/tsl/concurrency:executor",
         "//xla/tsl/platform:env",
@@ -487,6 +488,7 @@ xla_cc_test(
         "//xla/tsl/cuda:nccl",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_matchers",
+        "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -520,9 +522,13 @@ cc_library(
         "cuda-only",
         "gpu",
     ],
-    visibility = ["//xla/stream_executor/cuda:__subpackages__"],
+    visibility = [
+        "//xla/backends/gpu/runtime:__subpackages__",
+        "//xla/stream_executor/cuda:__subpackages__",
+    ],
     deps = [
         ":nccl_errors",
+        "//xla/core/collectives:rank_id",
         "//xla/core/collectives:symmetric_memory",
         "//xla/stream_executor:device_address",
         "//xla/tsl/cuda:nccl",
@@ -587,7 +593,6 @@ cc_library(
         "//xla/runtime:device_id",
         "//xla/runtime:process_id",
         "//xla/stream_executor:stream_executor_h",
-        "//xla/stream_executor/cuda:nccl_allocator",  # buildcleaner: keep (static registration)
         "//xla/tsl/cuda:nccl",
         "//xla/tsl/platform:env",
         "//xla/tsl/platform:logging",
@@ -826,7 +831,6 @@ cc_library(
         "//xla/stream_executor:device_address",
         "//xla/stream_executor:stream",
         "//xla/stream_executor/cuda:nvshmem",
-        "//xla/stream_executor/cuda:nvshmem_allocator",  # buildcleaner: keep (static registration)
         "//xla/tsl/concurrency:async_value",
         "//xla/tsl/platform:errors",
         "//xla/tsl/platform:statusor",
@@ -904,6 +908,11 @@ xla_test(
         ],
         # See b/491475964 for details.
         "gb200": [
+            "multi_gpu",
+            "broken",
+        ],
+        # See b/491475964 for details.
+        "gb300": [
             "multi_gpu",
             "broken",
         ],

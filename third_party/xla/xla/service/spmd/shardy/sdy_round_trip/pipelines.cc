@@ -90,7 +90,6 @@ void addSdyRoundTripImportPipeline(mlir::OpPassManager& pm,
   pm.addNestedPass<FuncOp>(
       mlir::stablehlo_ext::createStablehloCanonicalizeFromHloImportPass());
   pm.addPass(createSdyRoundTripImportShardyAttrsPass(enableHloShardingV3));
-  pm.addPass(mlir::sdy::createFlattenCallGraphPass());
   pm.addPass(createSdyRoundTripShardMapImportPass());
   pm.addPass(createImportSdyCustomCallsPass());
   pm.addNestedPass<FuncOp>(createOpenWhileFreeVarsShardingPass());
