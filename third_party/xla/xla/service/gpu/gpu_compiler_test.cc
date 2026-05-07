@@ -1976,6 +1976,54 @@ TEST_F(GpuCompilerTest,
               absl_testing::IsOkAndHolds(true));
 }
 
+TEST_F(
+    GpuCompilerTest,
+    ParametersOfCollectiveMosaicShouldBeCopiedToCollectiveMemoryWithMultiHost) {
+  if (device_description().gpu_compute_capability().IsRocm()) {
+    GTEST_SKIP() << "Mosaic GPU is not supported on ROCm.";
+  }
+  XLA_FFI_Handler_Bundle bundle = {
+      /*instantiate=*/nullptr,
+      /*prepare=*/nullptr,
+      /*initialize=*/nullptr,
+      /*execute=*/kMosaicGpuExecute,
+  };
+  xla::ffi::Ffi::RegisterStaticHandler(ffi::GetXlaFfiApi(), "mosaic_gpu_v2",
+                                       "CUDA", bundle);
+  constexpr absl::string_view kHlo = R"(
+    HloModule test
+    ENTRY main {
+      p = s32[1] parameter(0)
+      mosaic = (s32[1]{0}) custom-call(p), custom_call_target="mosaic_gpu_v2", api_version=API_VERSION_TYPED_FFI, backend_config={uses_xla_collective_metadata=true}
+      ROOT result = tuple(mosaic)
+    }
+  )";
+  HloModuleConfig config = GetModuleConfigForTest();
+  config.set_num_partitions(1);
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHlo, config));
+  Compiler::CompileOptions compile_options;
+  compile_options.gpu_topology =
+      GpuTopology(/*platform_version=*/"", 1, 2, 1, gpu_target_config());
+  ASSERT_OK_AND_ASSIGN(
+      auto optimized_module,
+      compiler()->RunHloPasses(module->Clone(), nullptr, compile_options));
+  ASSERT_OK_AND_ASSIGN(auto executable,
+                       compiler()->RunBackend(std::move(optimized_module),
+                                              nullptr, compile_options));
+  const HloModule& final_module =
+      tensorflow::down_cast<GpuExecutable*>(executable.get())->module();
+  const char* kExpected = R"(
+    // CHECK:  %copy = s32[1]{0:S(1)} copy(%p)
+    // CHECK:  %mosaic = (s32[1]{0:S(1)}) custom-call(%copy), custom_call_target="mosaic_gpu_v2", api_version=API_VERSION_TYPED_FFI, backend_config={uses_xla_collective_metadata=true}
+  )";
+  EXPECT_THAT(
+      RunFileCheck(final_module.ToString(HloPrintOptions{}
+                                             .set_print_operand_shape(false)
+                                             .set_print_metadata(false)),
+                   kExpected),
+      absl_testing::IsOkAndHolds(true));
+}
+
 struct GpuCompilerParametersCopyCollectiveMemoryTestParams {
   bool xla_gpu_enable_nccl_buffers;
   bool xla_gpu_experimental_enable_nccl_symmetric_buffers;
@@ -2124,6 +2172,30 @@ TEST_F(GpuCompilerTest, GlobalLLVMLockGetsReleasedForCustomCallThunkCreation) {
                                                /*run_hlo_passes=*/true));
   // Checking the result ensures that the custom call thunk was executed.
   EXPECT_EQ(result.GetLinear<int32_t>(0), 42);
+}
+
+// Reproducer for b/509990632.
+TEST_F(GpuCompilerTest, WhileLoopUnrollingFlagScalarConstantSinkerNoCrash) {
+  const char* const kHloString = R"(
+    HloModule test
+    fused_computation {
+      p0 = s32[] parameter(0)
+      p1 = s32[] parameter(1)
+      ROOT add = s32[] add(p0, p1)
+    }
+    ENTRY main {
+      p0 = s32[] parameter(0)
+      c1 = s32[] constant(1)
+      ROOT fusion = s32[] fusion(p0, c1), kind=kLoop, calls=fused_computation
+    }
+  )";
+
+  HloModuleConfig config = GetModuleConfigForTest();
+  auto& debug_options = config.mutable_debug_options();
+  debug_options.set_xla_gpu_enable_while_loop_unrolling(
+      DebugOptions::WHILE_LOOP_UNROLLING_FULL_UNROLL);
+
+  ASSERT_OK(GetOptimizedModuleForExecutable(kHloString, config).status());
 }
 }  // namespace gpu
 }  // namespace xla

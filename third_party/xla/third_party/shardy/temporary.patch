@@ -1,1609 +1,612 @@
-diff --git a/shardy/dialect/sdy/transforms/export/export_pipeline.cc b/shardy/dialect/sdy/transforms/export/export_pipeline.cc
-index 1801877..0e8233d 100644
---- a/shardy/dialect/sdy/transforms/export/export_pipeline.cc
-+++ b/shardy/dialect/sdy/transforms/export/export_pipeline.cc
-@@ -40,7 +40,12 @@ void runShardyPartitioner(OpPassManager& pm, int& dumpIndex,
-                           const ExportOptions& options) {
-   InsertExplicitReshardsPassOptions passOptions;
-   passOptions.enableFullVersion = options.enableInsertExplicitCollectives;
-+  passOptions.avoidReshardsOnCalls = options.avoidReshardsOnCalls;
-   pm.addNestedPass<func::FuncOp>(createInsertExplicitReshardsPass(passOptions));
-+  pm.addPass(createUnflattenCallGraphPass(
-+      UnflattenCallGraphPassOptions{options.dedupFunctionsFully}));
-+  // Keep a SymbolDCE after UnflattenCallGraph.
-+  pm.addPass(createSymbolDCEPass());
-   if (options.enableInsertExplicitCollectives) {
-     pm.addPass(mlir::sdy::createSaveModuleOpPass(
-         options.dumpDirectory, "after_explicit_reshards", dumpIndex++));
-@@ -84,10 +89,6 @@ void addExportPipeline(OpPassManager& pm, int& dumpIndex,
-     pm.addPass(createUpdateNonDivisibleInputOutputShardingsPass());
-     pm.addPass(createRemoveSubAxesInInputOutputShardingsPass());
-   }
--  pm.addPass(createUnflattenCallGraphPass(
--      UnflattenCallGraphPassOptions{options.dedupFunctionsFully}));
--  // Keep a SymbolDCE after UnflattenCallGraph.
--  pm.addPass(createSymbolDCEPass());
-   pm.addPass(createCloseShardingsPass());
- 
-   // We dump the module after propagation at this point, since the export passes
-@@ -100,6 +101,11 @@ void addExportPipeline(OpPassManager& pm, int& dumpIndex,
-   // reshards/collectives.
-   if (!options.avoidExportForPartitioning) {
-     runShardyPartitioner(pm, dumpIndex, options);
-+  } else {
-+    pm.addPass(createUnflattenCallGraphPass(
-+        UnflattenCallGraphPassOptions{options.dedupFunctionsFully}));
-+    // Keep a SymbolDCE after UnflattenCallGraph.
-+    pm.addPass(createSymbolDCEPass());
-   }
-   if (options.dumpPropagationEdges || options.dumpShardingOrigins) {
-     pm.addPass(createRemovePropagationDebugInfoPass());
-diff --git a/shardy/dialect/sdy/transforms/export/insert_explicit_reshards.cc b/shardy/dialect/sdy/transforms/export/insert_explicit_reshards.cc
-index f329d9e..5241691 100644
---- a/shardy/dialect/sdy/transforms/export/insert_explicit_reshards.cc
-+++ b/shardy/dialect/sdy/transforms/export/insert_explicit_reshards.cc
-@@ -495,8 +495,10 @@ struct InsertExplicitReshardsPass
-       }
- 
-       if (CallOp callOp = dyn_cast<CallOp>(op)) {
-+        if (!avoidReshardsOnCalls) {
-           insertExplicitReshardsOnCallOp(callOp, rewriter, symbolTable,
-                                          onFullVersion);
-+        }
-         return;
-       }
- 
-diff --git a/shardy/dialect/sdy/transforms/export/passes.td b/shardy/dialect/sdy/transforms/export/passes.td
-index 403cad1..9578a67 100644
---- a/shardy/dialect/sdy/transforms/export/passes.td
-+++ b/shardy/dialect/sdy/transforms/export/passes.td
-@@ -123,6 +123,10 @@ def InsertExplicitReshardsPass : Pass<"sdy-insert-explicit-reshards", "func::Fun
-       Option<"enableFullVersion", "enable-full-version",
-             "bool", /*default=*/"false",
-             "Enable full version.">,
-+      Option<"avoidReshardsOnCalls",
-+            "avoid-reshards-on-calls",
-+            "bool", /*default=*/"false",
-+            "Avoid explicit reshards/collectives on calls.">
-     ];
- }
- 
-diff --git a/shardy/dialect/sdy/transforms/export/test/call_ops_avoid_reshards_on_calls_true.mlir b/shardy/dialect/sdy/transforms/export/test/call_ops_avoid_reshards_on_calls_true.mlir
-new file mode 100644
-index 0000000..2db0115
---- /dev/null
-+++ b/shardy/dialect/sdy/transforms/export/test/call_ops_avoid_reshards_on_calls_true.mlir
-@@ -0,0 +1,126 @@
-+// RUN: sdy_opt %s -split-input-file -sdy-insert-explicit-reshards='enable-full-version=true avoid-reshards-on-calls=true' | FileCheck %s
-+
-+sdy.mesh @mesh = <["x"=2, "y"=2, "z"=4]>
-+
-+// CHECK-LABEL: func @call
-+func.func @call(%arg0: tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x"}]>}) -> (tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"z"}]>}) {
-+  // CHECK-NEXT: %[[CALL:.*]] = call @foo(%arg0)
-+  // CHECK-NEXT: %[[NEGATE:.*]] = stablehlo.negate %[[CALL]]
-+  // CHECK-NEXT: return %[[NEGATE]]
-+  %0 = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"z"}]>]>} : (tensor<210xf32>) -> (tensor<210xf32>)
-+  %1 = stablehlo.negate %0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"z"}]>]>} : tensor<210xf32>
-+  return %1 : tensor<210xf32>
-+}
-+
-+// CHECK-LABEL: func private @foo
-+func.func private @foo(%arg0: tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) -> (tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"z"}]>}) {
-+  // CHECK-NEXT: %[[ABS:.*]] = stablehlo.abs %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>}
-+  // CHECK-NEXT: %[[RESHARD:.*]] = sdy.reshard %[[ABS]] <@mesh, [{"z"}]>
-+  // CHECK-NEXT: return %[[RESHARD]]
-+  %0 = stablehlo.abs %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : tensor<210xf32>
-+  return %0 : tensor<210xf32>
-+}
-+
-+// -----
-+sdy.mesh @mesh = <["x"=4, "y"=2]>
-+
-+// CHECK-LABEL: func @call_empty_block
-+func.func @call_empty_block(%arg0: tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x"}]>}) -> (tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) {
-+  // CHECK-NEXT: %[[CALL:.*]] = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>}
-+  // CHECK-NEXT: %[[NEGATE:.*]] = stablehlo.negate %0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>}
-+  %0 = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<210xf32>) -> (tensor<210xf32>)
-+  %1 = stablehlo.negate %0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : tensor<210xf32>
-+  return %1 : tensor<210xf32>
-+}
-+
-+// CHECK-LABEL: func private @foo
-+func.func private @foo(%arg0: tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x"}]>}) -> (tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) {
-+  // CHECK-NEXT: %[[RESHARD:.*]] = sdy.reshard %arg0 <@mesh, [{"y"}]>
-+  // CHECK-NEXT: return %[[RESHARD]]
-+  return %arg0 : tensor<210xf32>
-+}
-+
-+// -----
-+sdy.mesh @mesh = <["a"=2, "b"=2, "c"=2]>
-+
-+// CHECK-LABEL: func @call_with_shardings
-+func.func @call_with_shardings(%arg0: tensor<8x2xi32>, %arg1: tensor<4x2xi32>) -> tensor<12x2xi32> {
-+  // CHECK-NEXT: %[[CALL:.*]]:2 = call @foo(%arg0, %arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}, {}]>, <@mesh, [{}, {}]>]>}
-+  // CHECK-NEXT: %[[RESHARD1:.*]] = sdy.reshard %[[CALL]]#0 <@mesh, [{}, {"a"}]>
-+  // CHECK-NEXT: %[[RESHARD2:.*]] = sdy.reshard %[[CALL]]#1 <@mesh, [{}, {"a"}]>
-+  // CHECK-NEXT: %[[CONCAT:.*]] = stablehlo.concatenate %[[RESHARD1]], %[[RESHARD2]], dim = 0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}, {"a"}]>]>}
-+  // CHECK-NEXT: %[[RESHARD3:.*]] = sdy.reshard %[[CONCAT]] <@mesh, [{}, {}]>
-+  %0:2 = call @foo(%arg0, %arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}, {}]>, <@mesh, [{}, {}]>]>} : (tensor<8x2xi32>, tensor<4x2xi32>) -> (tensor<8x2xi32>, tensor<4x2xi32>)
-+  %1 = stablehlo.concatenate %0#0, %0#1, dim = 0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}, {"a"}]>]>} : (tensor<8x2xi32>, tensor<4x2xi32>) -> tensor<12x2xi32>
-+  return %1 : tensor<12x2xi32>
-+}
-+
-+// CHECK-LABEL: func private @foo
-+func.func private @foo(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}, {}]>}, %arg1: tensor<4x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {}]>})
-+  -> (tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}, {}]>}, tensor<4x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {}]>}) {
-+  // CHECK-NEXT: %[[ABS:.*]] = stablehlo.abs %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}, {}]>]>}
-+  // CHECK-NEXT: %[[RESHARD0:.*]] = sdy.reshard %[[ABS]] <@mesh, [{}, {"a"}]>
-+  // CHECK-NEXT: %[[RESHARD1:.*]] = sdy.reshard %[[RESHARD0]] <@mesh, [{"a"}, {}]>
-+  // CHECK-NEXT: return %[[RESHARD1]], %arg1
-+  %0 = stablehlo.abs %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}, {"a"}]>]>} : tensor<8x2xi32>
-+  return %0, %arg1 : tensor<8x2xi32>, tensor<4x2xi32>
-+}
-+
-+// -----
-+sdy.mesh @mesh = <["x"=2, "y"=2, "z"=4]>
-+
-+// CHECK-LABEL: func @one_argument_to_multiple_calls(
-+func.func @one_argument_to_multiple_calls(%arg0: tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x"}]>}) -> (tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"z"}]>}) {
-+  // CHECK-NEXT: %[[CALL0:.*]] = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>}
-+  // CHECK-NEXT: %[[CALL1:.*]] = call @bar(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"z"}]>]>}
-+  // CHECK-NEXT: %[[RESHARD:.*]] = sdy.reshard %[[CALL0]] <@mesh, [{"z"}]>
-+  // CHECK-NEXT: %[[ADD:.*]] = stablehlo.add %[[RESHARD]], %[[CALL1]] {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"z"}]>]>}
-+  // CHECK-NEXT: return %[[ADD]]
-+  %0 = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<210xf32>) -> (tensor<210xf32>)
-+  %1 = call @bar(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"z"}]>]>} : (tensor<210xf32>) -> (tensor<210xf32>)
-+  %3 = stablehlo.add %0, %1 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"z"}]>]>} : tensor<210xf32>
-+  return %3 : tensor<210xf32>
-+}
-+
-+// CHECK-LABEL: func private @foo
-+func.func private @foo(%arg0: tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) -> (tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) {
-+  // CHECK-NEXT: %[[ABS:.*]] = stablehlo.abs %arg0
-+  // CHECK-NEXT: return %[[ABS]]
-+  %0 = stablehlo.abs %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : tensor<210xf32>
-+  return %0 : tensor<210xf32>
-+}
-+
-+// CHECK-LABEL: func private @bar
-+func.func private @bar(%arg0: tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"z"}]>}) -> (tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"z"}]>}) {
-+  // CHECK-NEXT: %[[ABS:.*]] = stablehlo.abs %arg0
-+  // CHECK-NEXT: return %[[ABS]]
-+  %0 = stablehlo.abs %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"z"}]>]>} : tensor<210xf32>
-+  return %0 : tensor<210xf32>
-+}
-+
-+// -----
-+sdy.mesh @mesh = <["x"=2, "y"=2, "z"=4]>
-+
-+
-+// CHECK-LABEL: func @different_arguments_to_multiple_calls_with_same_input_output_shardings
-+func.func @different_arguments_to_multiple_calls_with_same_input_output_shardings(%arg0: tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x"}]>}) -> (tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) {
-+  // CHECK-NEXT: %[[CALL0:.*]] = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>}
-+  // CHECK-NEXT: %[[NEGATE:.*]] = stablehlo.negate %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}]>]>}
-+  // CHECK-NEXT: %[[RESHARD:.*]] = sdy.reshard %[[NEGATE]] <@mesh, [{"y"}]>
-+  // CHECK-NEXT: %[[CALL1:.*]] = call @foo(%[[RESHARD]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>}
-+  // CHECK-NEXT: %[[ADD:.*]] = stablehlo.add %[[CALL0]], %[[CALL1]] {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>}
-+  // CHECK-NEXT: return %[[ADD]]
-+  %0 = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<210xf32>) -> (tensor<210xf32>)
-+  %1 = stablehlo.negate %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : tensor<210xf32>
-+  %2 = call @foo(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<210xf32>) -> (tensor<210xf32>)
-+  %4 = stablehlo.add %0, %2 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : tensor<210xf32>
-+  return %4 : tensor<210xf32>
-+}
-+
-+// CHECK-LABEL: func private @foo
-+func.func private @foo(%arg0: tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) -> (tensor<210xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) {
-+  // CHECK-NEXT: %[[ABS:.*]] = stablehlo.abs %arg0
-+  // CHECK-NEXT: return %[[ABS]]
-+  %3 = stablehlo.abs %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : tensor<210xf32>
-+  return %3 : tensor<210xf32>
-+}
-diff --git a/shardy/dialect/sdy/transforms/export/test/unflatten_call_graph.mlir b/shardy/dialect/sdy/transforms/export/test/unflatten_call_graph.mlir
-index ce7717c..0befeb1 100644
---- a/shardy/dialect/sdy/transforms/export/test/unflatten_call_graph.mlir
-+++ b/shardy/dialect/sdy/transforms/export/test/unflatten_call_graph.mlir
-@@ -12,7 +12,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME: %arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}, {"x"}]>})
- // CHECK-SAME: -> (tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"x"}, {"y"}]>}) {
- func.func @ignore_operand_shardings(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}, {"x"}]>}) -> (tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"x"}, {"y"}]>}) {
--  // CHECK-NEXT: %[[CALL:.*]] = call @foo(%arg0)
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @foo(%[[COPY]])
-   // CHECK-SAME:   {mhlo.frontend_attributes = {backend_config = "{\22flag_configs\22:[],\22scoped_memory_configs\22:[],\22device_type\22:\22DEVICE_TYPE_HOST\22,\22used_scoped_memory_configs\22:[]}"},
-   // CHECK-SAME:    random_attr = "random_value",
-   // CHECK-SAME:    sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>}
-@@ -381,13 +382,14 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-LABEL: func @calls_different_funcs_with_manual_axes_one_without(
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
--// CHECK:       %[[MANUAL_RET:.*]] = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %[[CALL1:.*]] = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %[[CALL2:.*]] = func.call @foo(%[[CALL1]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %[[CALL2]] : tensor<4xf32>
-+// CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-+// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %[[BAR_RET:.*]] = call @bar(%[[MANUAL_RET]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %[[BAR_RET]] : tensor<8xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %2 : tensor<8xf32>
- func.func @calls_different_funcs_with_manual_axes_one_without(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -429,13 +431,14 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-LABEL: func @calls_same_funcs_with_manual_axes_one_without(
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
--// CHECK:       %[[MANUAL_RET:.*]] = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %[[CALL1:.*]] = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %[[CALL2:.*]] = func.call @foo(%[[CALL1]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %[[CALL2]] : tensor<4xf32>
-+// CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-+// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %[[BAR_RET:.*]] = call @bar(%[[MANUAL_RET]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %[[BAR_RET]] : tensor<8xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %2 : tensor<8xf32>
- func.func @calls_same_funcs_with_manual_axes_one_without(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -477,16 +480,17 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-LABEL: func @calls_same_funcs_without_manual_axes_one_inside_manual_computation(
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) {
--// CHECK:       %[[MANUAL_RET1:.*]] = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={} (%arg1: tensor<8xf32>) {
--// CHECK-NEXT:    %[[CALL1:.*]] = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:    sdy.return %[[CALL1]] : tensor<8xf32>
-+// CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={} (%arg1: tensor<8xf32>) {
-+// CHECK-NEXT:    %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<8xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %[[MANUAL_RET2:.*]] = sdy.manual_computation(%[[MANUAL_RET1]]) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %[[CALL2:.*]] = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %[[CALL2]] : tensor<4xf32>
-+// CHECK-NEXT:  %1 = sdy.manual_computation(%0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-+// CHECK-NEXT:    %4 = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %[[CALL3:.*]] = call @foo(%[[MANUAL_RET2]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %[[CALL3]] : tensor<8xf32>
-+// CHECK-NEXT:  %2 = sdy.reshard %1 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %3 = call @foo(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %3 : tensor<8xf32>
- func.func @calls_same_funcs_without_manual_axes_one_inside_manual_computation(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={} (%arg1: tensor<8xf32>) {
-     %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-@@ -526,14 +530,16 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
- // CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %4 = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %5 = func.call @bar(%4) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %5 : tensor<4xf32>
-+// CHECK-NEXT:    %6 = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %7 = func.call @bar(%6) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %7 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @foo(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
- // CHECK-NEXT:  %2 = call @foo(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %3 = call @foo_1(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x", "y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %3 : tensor<8xf32>
-+// CHECK-NEXT:  %3 = call @foo(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  %4 = sdy.reshard %3 <@mesh, [{"x", "y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %5 = call @foo_1(%4) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x", "y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %5 : tensor<8xf32>
- func.func @calls_with_manual_axes(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %4 = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -771,19 +777,21 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
- // CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = sdy.manual_computation(%arg1) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={"y"} (%arg2: tensor<2xf32>) {
--// CHECK-NEXT:      %5 = func.call @foo(%arg2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<2xf32>) -> tensor<2xf32>
--// CHECK-NEXT:      sdy.return %5 : tensor<2xf32>
--// CHECK-NEXT:    } : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %4 = func.call @bar(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
--// CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = sdy.manual_computation(%0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x", "y"} (%arg1: tensor<2xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<2xf32>) -> tensor<2xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<2xf32>
--// CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %2 = call @baz(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %2 : tensor<8xf32>
-+// CHECK-NEXT:    %4 = sdy.manual_computation(%arg1) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={"y"} (%arg2: tensor<2xf32>) {
-+// CHECK-NEXT:      %7 = func.call @foo(%arg2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<2xf32>) -> tensor<2xf32>
-+// CHECK-NEXT:        sdy.return %7 : tensor<2xf32>
-+// CHECK-NEXT:      } : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:      %5 = sdy.reshard %4 <@mesh, [{}]> : tensor<4xf32>
-+// CHECK-NEXT:      %6 = func.call @bar(%5) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:      sdy.return %6 : tensor<4xf32>
-+// CHECK-NEXT:    } : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:    %1 = sdy.manual_computation(%0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x", "y"} (%arg1: tensor<2xf32>) {
-+// CHECK-NEXT:      %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<2xf32>) -> tensor<2xf32>
-+// CHECK-NEXT:      sdy.return %4 : tensor<2xf32>
-+// CHECK-NEXT:    } : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:    %2 = sdy.reshard %1 <@mesh, [{"x"}]> : tensor<8xf32>
-+// CHECK-NEXT:    %3 = call @baz(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:    return %3 : tensor<8xf32>
- func.func @nested_manual_computations(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %3 = sdy.manual_computation(%arg1) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={"y"} (%arg2: tensor<2xf32>) {
-@@ -847,12 +855,14 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
- // CHECK-NEXT:  %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %3 = func.call @foo_0(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<4xf32>
-+// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %4 = sdy.reshard %3 <@mesh, [{}]> : tensor<4xf32>
-+// CHECK-NEXT:    %5 = func.call @foo_0(%4) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %5 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @bar(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %1 : tensor<8xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %2 : tensor<8xf32>
- func.func @calls_same_funcs_on_the_same_manual_axes_different_shardings(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -925,9 +935,12 @@ attributes { sdy.original_func_name = "baz" } {
- sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-LABEL: func @multiple_same_calls_different_shardings_different_number_of_call_sites
- func.func @multiple_same_calls_different_shardings_different_number_of_call_sites(%arg0: tensor<8x2xi32>) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %[[CALL0:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
--  // CHECK-NEXT: %[[CALL1:.*]] = call @baz_0(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
--  // CHECK-NEXT: %[[CALL2:.*]] = call @baz_0(%[[CALL0]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-+  // CHECK-NEXT: %[[COPY0:.*]] = sdy.reshard %arg0 <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL0:.*]] = call @baz(%[[COPY0]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-+  // CHECK-NEXT: %[[COPY1:.*]] = sdy.reshard %arg0 <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL1:.*]] = call @baz_0(%[[COPY1]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-+  // CHECK-NEXT: %[[COPY2:.*]] = sdy.reshard %[[CALL0]] <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL2:.*]] = call @baz_0(%[[COPY2]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   // CHECK-NEXT: return %[[CALL2]] : tensor<8x2xi32>
-   %0 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   %1 = call @baz_0(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-@@ -995,16 +1008,18 @@ attributes { sdy.original_func_name = "baz" } {
- sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-LABEL: func @calls_same_funcs_two_same_manual_axes_different_shardings_one_without_manual_axes(
- // CHECK-NEXT:  %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %4 = func.call @foo_0(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %5 = sdy.reshard %4 <@mesh, [{}]> : tensor<4xf32>
-+// CHECK-NEXT:    %6 = func.call @foo_0(%5) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %6 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @bar(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %2 = sdy.manual_computation(%1) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<4xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  %3 = sdy.manual_computation(%2) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-+// CHECK-NEXT:    %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %2 : tensor<8xf32>
-+// CHECK-NEXT:  return %3 : tensor<8xf32>
- func.func @calls_same_funcs_two_same_manual_axes_different_shardings_one_without_manual_axes(%arg0: tensor<8xf32>) -> tensor<8xf32> {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -1088,7 +1103,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- func.func @multiple_same_calls_different_shardings_different_number_of_call_sites_without_original_func_names(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"y"}]>}) -> tensor<8x2xi32> {
-   // CHECK-NEXT: %[[CALL0:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>}
-   // CHECK-NEXT: %[[CALL1:.*]] = call @baz_0(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>}
--  // CHECK-NEXT: %[[CALL2:.*]] = call @baz_1(%[[CALL0]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>}
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %[[CALL0]] <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL2:.*]] = call @baz_1(%[[COPY]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>}
-   // CHECK-NEXT: return %[[CALL2]] : tensor<8x2xi32>
-   %0 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   %1 = call @baz_0(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-@@ -1156,16 +1172,18 @@ func.func private @baz_0(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@m
- sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-LABEL: func @calls_same_funcs_two_same_manual_axes_different_shardings_one_without_manual_axes_without_original_func_names(
- // CHECK-NEXT:  %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %4 = func.call @foo_0(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %5 = sdy.reshard %4 <@mesh, [{}]> : tensor<4xf32>
-+// CHECK-NEXT:    %6 = func.call @foo_0(%5) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %6 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @bar(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %2 = sdy.manual_computation(%1) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo_1(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<4xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  %3 = sdy.manual_computation(%2) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-+// CHECK-NEXT:    %4 = func.call @foo_1(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %2 : tensor<8xf32>
-+// CHECK-NEXT:  return %3 : tensor<8xf32>
- func.func @calls_same_funcs_two_same_manual_axes_different_shardings_one_without_manual_axes_without_original_func_names(%arg0: tensor<8xf32>) -> tensor<8xf32> {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -1238,7 +1256,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- 
- // CHECK-LABEL: func @single_call_different_argument_and_func_input_sharding(
- func.func @single_call_different_argument_and_func_input_sharding(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"x"}]>}) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%[[COPY]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   // CHECK-NEXT: return %[[CALL]] : tensor<8x2xi32>
-   %0 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   return %0 : tensor<8x2xi32>
-@@ -1255,7 +1274,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- 
- // CHECK-LABEL: func @single_call_no_func_input_sharding(
- func.func @single_call_no_func_input_sharding(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"y"}]>}) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%[[COPY]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   // CHECK-NEXT: return %[[CALL]] : tensor<8x2xi32>
-   %0 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   return %0 : tensor<8x2xi32>
-@@ -1272,7 +1292,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- 
- // CHECK-LABEL: func @single_call_different_argument_and_func_input_sharding_argument_reused(
- func.func @single_call_different_argument_and_func_input_sharding_argument_reused(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"x"}]>}) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%[[COPY]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   // CHECK-NEXT: %[[ADD:.*]] = stablehlo.add %[[CALL]], %arg0 : tensor<8x2xi32>
-   // CHECK-NEXT: return %[[ADD]] : tensor<8x2xi32>
-   %0 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-@@ -1441,7 +1462,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- 
- // CHECK-LABEL: func @single_call_func_arg_has_sharding_call_arg_no_sharding(
- func.func @single_call_func_arg_has_sharding_call_arg_no_sharding(%arg0: tensor<8x2xi32>) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%arg0) :
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%[[COPY]]) :
-   // CHECK-NEXT: return %[[CALL]]
-   %0 = call @baz(%arg0) : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   return %0 : tensor<8x2xi32>
-@@ -1458,7 +1480,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- 
- // CHECK-LABEL: func @single_call_func_arg_no_sharding_call_arg_has_sharding(
- func.func @single_call_func_arg_no_sharding_call_arg_has_sharding(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"y"}]>}) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%arg0) :
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%[[COPY]]) :
-   // CHECK-NEXT: return %[[CALL]]
-   %0 = call @baz(%arg0) : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   return %0 : tensor<8x2xi32>
-@@ -1479,6 +1502,7 @@ sdy.mesh @mesh = <["a"=2]>
- // CHECK-NEXT:      func.call @bar_0
- // CHECK-NEXT:      sdy.return
- // CHECK-NEXT:    }
-+// CHECK-NEXT:    sdy.reshard
- // CHECK-NEXT:    call @bar
- // CHECK-NEXT:    return
- func.func @non_flat_manual_computation_and_non_manual_computation_calls_same_original_func(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-@@ -1593,26 +1617,3 @@ func.func private @bar_0(%arg0: tensor<8xi32>) -> tensor<8xi32> attributes {sdy.
- func.func private @bar_1(%arg0: tensor<8xi32>) -> tensor<8xi32> attributes {sdy.func_manual_axes = #sdy<manual_axes{"a"}>, sdy.original_func_name = "bar"} {
-   return %arg0 : tensor<8xi32>
- }
--
--// -----
--sdy.mesh @mesh = <["x"=2, "y"=2]>
--//CHECK-LABEL: func @three_calls_same_origin_func_with_different_func_input_shardings(
--func.func @three_calls_same_origin_func_with_different_func_input_shardings(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"x"}]>}) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %0 = call @baz(%arg0) :
--  // CHECK-NEXT: %1 = call @baz_0(%arg0) :
--  // CHECK-NEXT: %2 = call @baz_0(%arg0) :
--  %0 = call @baz(%arg0) : (tensor<8x2xi32>) -> tensor<8x2xi32>
--  %1 = call @baz_0(%arg0) : (tensor<8x2xi32>) -> tensor<8x2xi32>
--  %2 = call @baz_0(%arg0) : (tensor<8x2xi32>) -> tensor<8x2xi32>
--  %3 = stablehlo.add %0, %1 : tensor<8x2xi32>
--  return %3 : tensor<8x2xi32>
--}
--func.func private @baz(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"x"}]>}) -> tensor<8x2xi32> {
--  %0 = stablehlo.multiply %arg0, %arg0 : tensor<8x2xi32>
--  return %0 : tensor<8x2xi32>
--}
--func.func private @baz_0(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"y"}]>}) -> tensor<8x2xi32>
--attributes { sdy.original_func_name = "baz" } {
--  %0 = stablehlo.multiply %arg0, %arg0: tensor<8x2xi32>
--  return %0 : tensor<8x2xi32>
--}
-diff --git a/shardy/dialect/sdy/transforms/export/test/unflatten_call_graph_dedup_functions_fully_true.mlir b/shardy/dialect/sdy/transforms/export/test/unflatten_call_graph_dedup_functions_fully_true.mlir
-index e2ad522..7d50262 100644
---- a/shardy/dialect/sdy/transforms/export/test/unflatten_call_graph_dedup_functions_fully_true.mlir
-+++ b/shardy/dialect/sdy/transforms/export/test/unflatten_call_graph_dedup_functions_fully_true.mlir
-@@ -12,7 +12,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME: %arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}, {"x"}]>})
- // CHECK-SAME: -> (tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"x"}, {"y"}]>}) {
- func.func @ignore_operand_shardings(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}, {"x"}]>}) -> (tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"x"}, {"y"}]>}) {
--  // CHECK-NEXT: %[[CALL:.*]] = call @foo(%arg0)
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @foo(%[[COPY]])
-   // CHECK-SAME:   {mhlo.frontend_attributes = {backend_config = "{\22flag_configs\22:[],\22scoped_memory_configs\22:[],\22device_type\22:\22DEVICE_TYPE_HOST\22,\22used_scoped_memory_configs\22:[]}"},
-   // CHECK-SAME:    random_attr = "random_value",
-   // CHECK-SAME:    sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>}
-@@ -380,12 +381,13 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
- // CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %3 = func.call @foo(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<4xf32>
-+// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @bar(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %1 : tensor<8xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %2 : tensor<8xf32>
- func.func @calls_different_funcs_with_manual_axes_one_without(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -428,12 +430,13 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
- // CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %3 = func.call @foo(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<4xf32>
-+// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @bar(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %1 : tensor<8xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %2 : tensor<8xf32>
- func.func @calls_same_funcs_with_manual_axes_one_without(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -476,15 +479,16 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) {
- // CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={} (%arg1: tensor<8xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<8xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<8xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
- // CHECK-NEXT:  %1 = sdy.manual_computation(%0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %2 = call @foo(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %2 : tensor<8xf32>
-+// CHECK-NEXT:  %2 = sdy.reshard %1 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %3 = call @foo(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %3 : tensor<8xf32>
- func.func @calls_same_funcs_without_manual_axes_one_inside_manual_computation(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={} (%arg1: tensor<8xf32>) {
-     %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-@@ -523,14 +527,15 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
- // CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %4 = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %5 = func.call @bar(%4) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %5 : tensor<4xf32>
-+// CHECK-NEXT:    %5 = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %6 = func.call @bar(%5) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %6 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @foo(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
- // CHECK-NEXT:  %2 = call @foo(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %3 = call @foo(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x", "y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %3 : tensor<8xf32>
-+// CHECK-NEXT:  %3 = call @foo(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  %4 = call @foo(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x", "y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %4 : tensor<8xf32>
- func.func @calls_with_manual_axes(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %4 = func.call @bar(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -766,19 +771,21 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
- // CHECK:       %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = sdy.manual_computation(%arg1) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={"y"} (%arg2: tensor<2xf32>) {
--// CHECK-NEXT:      %5 = func.call @foo(%arg2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<2xf32>) -> tensor<2xf32>
--// CHECK-NEXT:        sdy.return %5 : tensor<2xf32>
-+// CHECK-NEXT:    %4 = sdy.manual_computation(%arg1) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={"y"} (%arg2: tensor<2xf32>) {
-+// CHECK-NEXT:      %7 = func.call @foo(%arg2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<2xf32>) -> tensor<2xf32>
-+// CHECK-NEXT:        sdy.return %7 : tensor<2xf32>
- // CHECK-NEXT:      } : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:      %4 = func.call @bar(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:      sdy.return %4 : tensor<4xf32>
-+// CHECK-NEXT:      %5 = sdy.reshard %4 <@mesh, [{}]> : tensor<4xf32>
-+// CHECK-NEXT:      %6 = func.call @bar(%5) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:      sdy.return %6 : tensor<4xf32>
- // CHECK-NEXT:    } : (tensor<8xf32>) -> tensor<8xf32>
- // CHECK-NEXT:    %1 = sdy.manual_computation(%0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x", "y"} (%arg1: tensor<2xf32>) {
--// CHECK-NEXT:      %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<2xf32>) -> tensor<2xf32>
--// CHECK-NEXT:      sdy.return %3 : tensor<2xf32>
-+// CHECK-NEXT:      %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<2xf32>) -> tensor<2xf32>
-+// CHECK-NEXT:      sdy.return %4 : tensor<2xf32>
- // CHECK-NEXT:    } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:    %2 = call @baz(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:    return %2 : tensor<8xf32>
-+// CHECK-NEXT:    %2 = sdy.reshard %1 <@mesh, [{"x"}]> : tensor<8xf32>
-+// CHECK-NEXT:    %3 = call @baz(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:    return %3 : tensor<8xf32>
- func.func @nested_manual_computations(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %3 = sdy.manual_computation(%arg1) in_shardings=[<@mesh, [{"y"}]>] out_shardings=[<@mesh, [{"y"}]>] manual_axes={"y"} (%arg2: tensor<2xf32>) {
-@@ -840,12 +847,13 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-SAME:      %arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}
- // CHECK-SAME:      -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
- // CHECK-NEXT:  %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %3 = func.call @foo(%2) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<4xf32>
-+// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @bar(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %1 : tensor<8xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  return %2 : tensor<8xf32>
- func.func @calls_same_funcs_on_the_same_manual_axes_different_shardings(%arg0: tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) -> (tensor<8xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"x", "y"}]>}) {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %2 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -1016,16 +1024,17 @@ attributes { sdy.original_func_name = "baz" } {
- sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-LABEL: func @calls_same_funcs_two_same_manual_axes_different_shardings_one_without_manual_axes(
- // CHECK-NEXT:  %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %4 = func.call @foo(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %5 = func.call @foo(%4) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %5 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @bar(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %2 = sdy.manual_computation(%1) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<4xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  %3 = sdy.manual_computation(%2) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-+// CHECK-NEXT:    %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %2 : tensor<8xf32>
-+// CHECK-NEXT:  return %3 : tensor<8xf32>
- func.func @calls_same_funcs_two_same_manual_axes_different_shardings_one_without_manual_axes(%arg0: tensor<8xf32>) -> tensor<8xf32> {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -1108,7 +1117,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- func.func @multiple_same_calls_different_shardings_different_number_of_call_sites_without_original_func_names(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"y"}]>}) -> tensor<8x2xi32> {
-   // CHECK-NEXT: %[[CALL0:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>}
-   // CHECK-NEXT: %[[CALL1:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>}
--  // CHECK-NEXT: %[[CALL2:.*]] = call @baz(%[[CALL0]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>}
-+  // CHECK-NEXT: %[[COPY1:.*]] = sdy.reshard %[[CALL0]] <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL2:.*]] = call @baz(%[[COPY1]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>}
-   // CHECK-NEXT: return %[[CALL2]] : tensor<8x2xi32>
-   %0 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   %1 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {"y"}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-@@ -1176,16 +1186,18 @@ func.func private @baz_0(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@m
- sdy.mesh @mesh = <["x"=2, "y"=2]>
- // CHECK-LABEL: func @calls_same_funcs_two_same_manual_axes_different_shardings_one_without_manual_axes_without_original_func_names(
- // CHECK-NEXT:  %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    %4 = func.call @foo_0(%3) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
-+// CHECK-NEXT:    %4 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    %5 = sdy.reshard %4 <@mesh, [{}]> : tensor<4xf32>
-+// CHECK-NEXT:    %6 = func.call @foo_0(%5) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %6 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %1 = call @bar(%0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  %2 = sdy.manual_computation(%1) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
--// CHECK-NEXT:    %3 = func.call @foo_1(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
--// CHECK-NEXT:    sdy.return %3 : tensor<4xf32>
-+// CHECK-NEXT:  %1 = sdy.reshard %0 <@mesh, [{"y"}]> : tensor<8xf32>
-+// CHECK-NEXT:  %2 = call @bar(%1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<8xf32>) -> tensor<8xf32>
-+// CHECK-NEXT:  %3 = sdy.manual_computation(%2) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-+// CHECK-NEXT:    %4 = func.call @foo_1(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-+// CHECK-NEXT:    sdy.return %4 : tensor<4xf32>
- // CHECK-NEXT:  } : (tensor<8xf32>) -> tensor<8xf32>
--// CHECK-NEXT:  return %2 : tensor<8xf32>
-+// CHECK-NEXT:  return %3 : tensor<8xf32>
- func.func @calls_same_funcs_two_same_manual_axes_different_shardings_one_without_manual_axes_without_original_func_names(%arg0: tensor<8xf32>) -> tensor<8xf32> {
-   %0 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"x", "y"}]>] out_shardings=[<@mesh, [{"x", "y"}]>] manual_axes={"x"} (%arg1: tensor<4xf32>) {
-     %3 = func.call @foo(%arg1) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"y"}]>]>} : (tensor<4xf32>) -> tensor<4xf32>
-@@ -1255,7 +1267,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- 
- // CHECK-LABEL: func @single_call_different_argument_and_func_input_sharding(
- func.func @single_call_different_argument_and_func_input_sharding(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"x"}]>}) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%[[COPY]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   // CHECK-NEXT: return %[[CALL]] : tensor<8x2xi32>
-   %0 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   return %0 : tensor<8x2xi32>
-@@ -1272,7 +1285,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- 
- // CHECK-LABEL: func @single_call_no_func_input_sharding(
- func.func @single_call_no_func_input_sharding(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"y"}]>}) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%[[COPY]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   // CHECK-NEXT: return %[[CALL]] : tensor<8x2xi32>
-   %0 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   return %0 : tensor<8x2xi32>
-@@ -1289,7 +1303,8 @@ sdy.mesh @mesh = <["x"=2, "y"=2]>
- 
- // CHECK-LABEL: func @single_call_different_argument_and_func_input_sharding_argument_reused(
- func.func @single_call_different_argument_and_func_input_sharding_argument_reused(%arg0: tensor<8x2xi32> {sdy.sharding = #sdy.sharding<@mesh, [{}, {"x"}]>}) -> tensor<8x2xi32> {
--  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-+  // CHECK-NEXT: %[[COPY:.*]] = sdy.reshard %arg0 <@mesh, [{}, {"y"}]> : tensor<8x2xi32>
-+  // CHECK-NEXT: %[[CALL:.*]] = call @baz(%[[COPY]]) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-   // CHECK-NEXT: %[[ADD:.*]] = stablehlo.add %[[CALL]], %arg0 : tensor<8x2xi32>
-   // CHECK-NEXT: return %[[ADD]] : tensor<8x2xi32>
-   %0 = call @baz(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : (tensor<8x2xi32>) -> tensor<8x2xi32>
-diff --git a/shardy/dialect/sdy/transforms/export/unflatten_call_graph.cc b/shardy/dialect/sdy/transforms/export/unflatten_call_graph.cc
-index cfe8428..6e9dddd 100644
---- a/shardy/dialect/sdy/transforms/export/unflatten_call_graph.cc
-+++ b/shardy/dialect/sdy/transforms/export/unflatten_call_graph.cc
-@@ -139,6 +139,7 @@ struct UnflattenCallGraphPass
-           callOp, symbolTable, /*ignoreShardings=*/dedupFunctionsFully);
-       FuncOp funcOp = funcCache[funcCacheKey];
-       callOp.setCallee(funcOp.getName());
-+      insertReshardsOnFuncArguments(funcOp, callOp, symbolTable, rewriter);
-     });
- 
-     moduleOp.walk([&](FuncOp funcOp) {
-diff --git a/shardy/dialect/sdy/transforms/import/add_func_data_flow_edges.cc b/shardy/dialect/sdy/transforms/import/add_func_data_flow_edges.cc
-index 7768fb4..702545f 100644
---- a/shardy/dialect/sdy/transforms/import/add_func_data_flow_edges.cc
-+++ b/shardy/dialect/sdy/transforms/import/add_func_data_flow_edges.cc
-@@ -49,10 +49,6 @@ void addFuncDataFlowEdgeOps(ModuleOp moduleOp, const SymbolTable& symbolTable,
-     mlir::Block& entryBlock = funcOp.getBody().front();
-     rewriter.setInsertionPointToStart(&entryBlock);
-     for (Value argument : funcOp.getArguments()) {
--      if (!isStaticShapedType(argument.getType())) {
--        // Skip non-static-shaped types, e.g., tokens.
--        continue;
--      }
-       auto edgeOp =
-           FuncDataFlowEdgeOp::create(rewriter, funcOp.getLoc(), argument);
-       rewriter.replaceAllUsesExcept(argument, edgeOp, edgeOp);
-@@ -65,10 +61,6 @@ void addFuncDataFlowEdgeOps(ModuleOp moduleOp, const SymbolTable& symbolTable,
-   moduleOp.walk([&](CallOp callOp) {
-     rewriter.setInsertionPointAfter(callOp);
-     for (Value result : callOp.getResults()) {
--      if (!isStaticShapedType(result.getType())) {
--        // Skip non-static-shaped types, e.g., tokens.
--        continue;
--      }
-       auto edgeOp =
-           FuncDataFlowEdgeOp::create(rewriter, callOp.getLoc(), result);
-       rewriter.replaceAllUsesExcept(result, edgeOp, edgeOp);
-diff --git a/shardy/dialect/sdy/transforms/import/import_pipeline.cc b/shardy/dialect/sdy/transforms/import/import_pipeline.cc
-index 7a4b3c2..61d515e 100644
---- a/shardy/dialect/sdy/transforms/import/import_pipeline.cc
-+++ b/shardy/dialect/sdy/transforms/import/import_pipeline.cc
-@@ -43,6 +43,9 @@ void addImportPipeline(OpPassManager& pm, int& dumpIndex,
-       options.dumpDirectory, "before_propagation", dumpIndex++));
- 
-   pm.addPass(createAddDataFlowEdgesPass());
-+  if (options.enableNativeNonFlatSupport) {
-+    pm.addPass(createAddFuncDataFlowEdgesPass());
-+  }
-   pm.addPass(
-       createApplyShardingConstraintsPass(ApplyShardingConstraintsPassOptions{
-           options.debugShardingOrigins, options.debugPropagationEdgeSharding}));
-@@ -50,15 +53,9 @@ void addImportPipeline(OpPassManager& pm, int& dumpIndex,
-   // constraints. This ensures we can detect sharding conflicts between group
-   // members which have pre-propagation shardings due to sharding constraints.
-   pm.addPass(createShardingGroupImportPass());
--  if (options.enableNativeNonFlatSupport) {
--    pm.addPass(createAddFuncDataFlowEdgesPass());
--  }
-   pm.addPass(createFlattenCallGraphPass());
-   // Keep SymbolDCE after FlattenCallGraph.
-   pm.addPass(createSymbolDCEPass());
--  if (options.enableNativeNonFlatSupport) {
--    pm.addPass(createAddFuncDataFlowEdgesPass());
--  }
- }
- 
- void addImportPipeline(OpPassManager& pm, const PropagationOptions& options) {
-diff --git a/shardy/dialect/sdy/transforms/import/test/add_func_data_flow_edges.mlir b/shardy/dialect/sdy/transforms/import/test/add_func_data_flow_edges.mlir
-index 24e6986..00bf65e 100644
---- a/shardy/dialect/sdy/transforms/import/test/add_func_data_flow_edges.mlir
-+++ b/shardy/dialect/sdy/transforms/import/test/add_func_data_flow_edges.mlir
-@@ -418,54 +418,3 @@ func.func @main(%arg0: tensor<8xf32>) -> tensor<8xf32> {
-   return %0 : tensor<8xf32>
- }
- 
--// -----
--
--// test: token_typed_func_argument_skipped
--// Tokens are not static-shaped types, so no func_data_flow_edge should be
--// created for them. Only the tensor argument gets an edge op.
--// CHECK-LABEL: @bar(%arg0: !stablehlo.token, %arg1: tensor<8xf32>)
--func.func @bar(%arg0: !stablehlo.token, %arg1: tensor<8xf32>) -> tensor<8xf32> {
--  // CHECK-NEXT: %[[EDGE:.*]] = sdy.func_data_flow_edge %arg1
--  // CHECK-NEXT:                stablehlo.negate %[[EDGE]]
--  // CHECK-NOT:  sdy.func_data_flow_edge %arg0
--  %0 = stablehlo.negate %arg1 : tensor<8xf32>
--  return %0 : tensor<8xf32>
--}
--
--// CHECK-LABEL: @main
--func.func @main(%arg0: !stablehlo.token, %arg1: tensor<8xf32>) -> tensor<8xf32> {
--  // CHECK-NEXT: %[[CALL:.*]] = call @bar(%arg0, %arg1)
--  // CHECK-NEXT: %[[EDGE:.*]] = sdy.func_data_flow_edge %[[CALL]]
--  // CHECK-NEXT: stablehlo.abs %[[EDGE]]
--  %0 = call @bar(%arg0, %arg1) : (!stablehlo.token, tensor<8xf32>) -> (tensor<8xf32>)
--  %1 = stablehlo.abs %0 : tensor<8xf32>
--  return %1 : tensor<8xf32>
--}
--
--// -----
--
--// test: token_typed_call_result_skipped
--// Tokens are not static-shaped types, so no func_data_flow_edge should be
--// created for them. Only the tensor result gets an edge op.
--// CHECK-LABEL: @bar(%arg0: tensor<8xf32>)
--func.func @bar(%arg0: tensor<8xf32>) -> (!stablehlo.token, tensor<8xf32>) {
--  // CHECK-NEXT: %[[EDGE:.*]] = sdy.func_data_flow_edge %arg0
--  // CHECK-NEXT: %[[TOK:.*]] = stablehlo.create_token
--  // CHECK-NEXT: %[[NEG:.*]] = stablehlo.negate %[[EDGE]]
--  %tok = stablehlo.create_token : !stablehlo.token
--  %0 = stablehlo.negate %arg0 : tensor<8xf32>
--  return %tok, %0 : !stablehlo.token, tensor<8xf32>
--}
--
--// CHECK-LABEL: @main
--func.func @main(%arg0: tensor<8xf32>) -> tensor<8xf32> {
--  // CHECK-NEXT: %[[CALL:.*]]:2 = call @bar(%arg0)
--  // CHECK-NEXT: %[[EDGE:.*]] = sdy.func_data_flow_edge %[[CALL]]#1
--  // CHECK-NOT:  sdy.func_data_flow_edge %[[CALL]]#0
--  // CHECK-NEXT: stablehlo.abs %[[EDGE]]
--  %0:2 = call @bar(%arg0) : (tensor<8xf32>) -> (!stablehlo.token, tensor<8xf32>)
--  %1 = stablehlo.abs %0#1 : tensor<8xf32>
--  return %1 : tensor<8xf32>
--}
--
--
-diff --git a/shardy/dialect/sdy/transforms/import/test/flatten_call_graph.mlir b/shardy/dialect/sdy/transforms/import/test/flatten_call_graph.mlir
-index 9b470e9..fa9c856 100644
---- a/shardy/dialect/sdy/transforms/import/test/flatten_call_graph.mlir
-+++ b/shardy/dialect/sdy/transforms/import/test/flatten_call_graph.mlir
-@@ -1,47 +1,60 @@
- // RUN: sdy_opt %s -split-input-file -sdy-flatten-call-graph | FileCheck %s
- 
- // CHECK-LABEL: func @singleton(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @singleton(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // -----
- 
- // CHECK-LABEL: func @simple_call_graph(%arg0: tensor<8xi32>) -> tensor<8xi32> {
- // CHECK-NEXT:    call @foo(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @simple_call_graph(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0 : tensor<8xi32>
-+  %1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-+  return %1 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // -----
- 
- // CHECK-LABEL: func @main_calls_foo_twice(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
- // CHECK-NEXT:    call @foo(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @foo_0(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @main_calls_foo_twice(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-   %1 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge1, %edge2 : tensor<8xi32>, tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo_0(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "foo"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- 
- 
-@@ -49,232 +62,318 @@ func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
- 
- // CHECK-LABEL: func @main_calls_foo_calls_bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
- // CHECK-NEXT:    call @foo(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @main_calls_foo_calls_bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0 : tensor<8xi32>
-+  %1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-+  return %1 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  %1 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %1 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  %1 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %2 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // -----
- 
- // CHECK-LABEL: func @main_calls_foo_calls_bar_twice(%arg0: tensor<8xi32>) -> tensor<8xi32> {
- // CHECK-NEXT:    call @foo(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @main_calls_foo_calls_bar_twice(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0 : tensor<8xi32>
-+  %1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-+  return %1 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar_0(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    stablehlo.add
- func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  %1 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  %2 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  %3 = stablehlo.add %1, %2 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  %1 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  %2 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %2 : tensor<8xi32>
-+  %3 = stablehlo.add %edge1, %edge2 : tensor<8xi32>
-   return %3 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar_0(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "bar"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- 
- // -----
- 
- // CHECK-LABEL: func @simple_non_flat(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
- // CHECK-NEXT:    call @foo(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar_0(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @simple_non_flat(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-   %1 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge1, %edge2 : tensor<8xi32>, tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  %1 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %1 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  %1 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar_0(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "bar"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- 
- // -----
- 
- // CHECK-LABEL: func @main_calls_foo_twice_and_foo_calls_bar_twice(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
- // CHECK-NEXT:    call @foo(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @foo_3(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @main_calls_foo_twice_and_foo_calls_bar_twice(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-   %1 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge1, %edge2 : tensor<8xi32>, tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar_0(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    stablehlo.add
- func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  %1 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  %2 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  %3 = stablehlo.add %1, %2 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  %1 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  %2 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %2 : tensor<8xi32>
-+  %3 = stablehlo.add %edge1, %edge2 : tensor<8xi32>
-   return %3 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar_0(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "bar"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- 
- // CHECK-LABEL: func private @bar_1(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "bar"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- 
- // CHECK-LABEL: func private @bar_0_2(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "bar"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- 
- // CHECK-LABEL: func private @foo_3(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "foo"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar_1(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar_0_2(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    stablehlo.add
- 
- // -----
- 
- // CHECK-LABEL: func @main_calls_foo_twice_and_foo_calls_bar_once(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
- // CHECK-NEXT:    call @foo(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @foo_1(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @main_calls_foo_twice_and_foo_calls_bar_once(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-   %1 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge1, %edge2 : tensor<8xi32>, tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  %1 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %1: tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  %1 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge: tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar_0(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "bar"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- 
- // CHECK-LABEL: func private @foo_1(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "foo"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar_0(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- 
- // -----
- 
- // CHECK-LABEL:func.func @complex_non_flat(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
--// CHECK-NEXT:   %[[CALL0:.*]] = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--// CHECK-NEXT:   %[[CALL1:.*]] = call @bar_4(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--// CHECK-NEXT:   return %[[CALL0]], %[[CALL1]] : tensor<8xi32>, tensor<8xi32>
-+// CHECK-NEXT:   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:   %1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-+// CHECK-NEXT:   %2 = call @bar_4(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:   %3 = sdy.func_data_flow_edge %2 : tensor<8xi32>
-+// CHECK-NEXT:   return %1, %3 : tensor<8xi32>, tensor<8xi32>
- // CHECK-NEXT: }
- // CHECK-LABEL:func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--// CHECK-NEXT:   %[[CALL2:.*]] = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--// CHECK-NEXT:   %[[CALL3:.*]] = call @bar_1(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--// CHECK-NEXT:   %[[ADD:.*]] = stablehlo.add %[[CALL2]], %[[CALL3]] : tensor<8xi32>
--// CHECK-NEXT:   %[[CALL4:.*]] = call @baz_2(%[[ADD]]) : (tensor<8xi32>) -> tensor<8xi32>
--// CHECK-NEXT:   return %[[CALL4]] : tensor<8xi32>
-+// CHECK-NEXT:   %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   %1 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:   %2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+// CHECK-NEXT:   %3 = call @bar_1(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:   %4 = sdy.func_data_flow_edge %3 : tensor<8xi32>
-+// CHECK-NEXT:   %5 = stablehlo.add %2, %4 : tensor<8xi32>
-+// CHECK-NEXT:   %6 = call @baz_2(%5) : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:   %7 = sdy.func_data_flow_edge %6 : tensor<8xi32>
-+// CHECK-NEXT:   return %7 : tensor<8xi32>
- // CHECK-NEXT: }
- // CHECK-LABEL:func.func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--// CHECK-NEXT:   %[[CALL5:.*]] = call @baz(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--// CHECK-NEXT:   return %[[CALL5]] : tensor<8xi32>
-+// CHECK-NEXT:   %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   %1 = call @baz(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:   %2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+// CHECK-NEXT:   return %2 : tensor<8xi32>
- // CHECK-NEXT: }
- // CHECK-LABEL:func.func private @baz(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--// CHECK-NEXT:   return %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   return %0 : tensor<8xi32>
- // CHECK-NEXT: }
- // CHECK-LABEL:func.func private @baz_0(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME: attributes {sdy.original_func_name = "baz"} {
--// CHECK-NEXT:   return %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   return %0 : tensor<8xi32>
- // CHECK-NEXT: }
- // CHECK-LABEL:func.func private @bar_1(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME: attributes {sdy.original_func_name = "bar"} {
--// CHECK-NEXT:   %[[CALL6:.*]] = call @baz_0(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--// CHECK-NEXT:   return %[[CALL6]] : tensor<8xi32>
-+// CHECK-NEXT:   %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   %1 = call @baz_0(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:   %2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+// CHECK-NEXT:   return %2 : tensor<8xi32>
- // CHECK-NEXT: }
- // CHECK-LABEL:func.func private @baz_2(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME: attributes {sdy.original_func_name = "baz"} {
--// CHECK-NEXT:   return %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   return %0 : tensor<8xi32>
- // CHECK-NEXT: }
- // CHECK-LABEL:func.func private @baz_3(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME: attributes {sdy.original_func_name = "baz"} {
--// CHECK-NEXT:   return %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   return %0 : tensor<8xi32>
- // CHECK-NEXT: }
- // CHECK-LABEL:func.func private @bar_4(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME: attributes {sdy.original_func_name = "bar"} {
--// CHECK-NEXT:   %[[CALL7:.*]] = call @baz_3(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--// CHECK-NEXT:   return %[[CALL7]] : tensor<8xi32>
-+// CHECK-NEXT:   %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+// CHECK-NEXT:   %1 = call @baz_3(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:   %2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+// CHECK-NEXT:   return %2 : tensor<8xi32>
- // CHECK-NEXT: }
- func.func @complex_non_flat(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-   %1 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge1, %edge2 : tensor<8xi32>, tensor<8xi32>
- }
- func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  %1 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  %2 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  %3 = stablehlo.add %1, %2 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  %1 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  %2 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %2 : tensor<8xi32>
-+  %3 = stablehlo.add %edge1, %edge2 : tensor<8xi32>
-   %4 = call @baz(%3) : (tensor<8xi32>) -> tensor<8xi32>
--  return %4 : tensor<8xi32>
-+  %edge3 = sdy.func_data_flow_edge %4 : tensor<8xi32>
-+  return %edge3 : tensor<8xi32>
- }
- 
- func.func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  %1 = call @baz(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %1: tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  %1 = call @baz(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge: tensor<8xi32>
- }
- 
- func.func private @baz(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // -----
-@@ -283,22 +382,29 @@ sdy.mesh @mesh = #sdy.mesh<["a"=2, "b"=2]>
- 
- // CHECK-LABEL: func @simple_non_flat_sharding_on_func_arguments(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
- // CHECK-NEXT:    call @foo(%arg0)
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @foo_0(%arg0)
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @simple_non_flat_sharding_on_func_arguments(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-   %1 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge1, %edge2 : tensor<8xi32>, tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>}) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>}
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>}) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>} : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo_0(%arg0: tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>}) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "foo"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>}
- // CHECK-NEXT:    return
- 
- // -----
-@@ -307,22 +413,29 @@ sdy.mesh @mesh = #sdy.mesh<["a"=2, "b"=2]>
- 
- // CHECK-LABEL: func @simple_non_flat_sharding_on_func_results(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
- // CHECK-NEXT:    call @foo(%arg0)
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @foo_0(%arg0)
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @simple_non_flat_sharding_on_func_results(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-   %1 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge1, %edge2 : tensor<8xi32>, tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> (tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>}) {
-+// CHECK-NEXT:    sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>}
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32>) -> (tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>}) {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>} : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo_0(%arg0: tensor<8xi32>) -> (tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>})
- // CHECK-SAME:  attributes {sdy.original_func_name = "foo"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>}
- // CHECK-NEXT:    return
- 
- // -----
-@@ -331,22 +444,29 @@ sdy.mesh @mesh = #sdy.mesh<["a"=2, "b"=2]>
- 
- // CHECK-LABEL: func @simple_non_flat_non_matching_sharding_on_func_results_and_second_call_results(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
- // CHECK-NEXT:    call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @foo_0(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"b"}]>]>} : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:    sdy.func_data_flow_edge {{.*}} {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"b"}]>]>}
- // CHECK-NEXT:    return
- func.func @simple_non_flat_non_matching_sharding_on_func_results_and_second_call_results(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-   %1 = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"b"}]>]>} : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %1 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"b"}]>]>} : tensor<8xi32>
-+  return %edge1, %edge2 : tensor<8xi32>, tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> (tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>}) {
-+// CHECK-NEXT:    sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>}
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32>) -> (tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>}) {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>} : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo_0(%arg0: tensor<8xi32>) -> (tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>})
- // CHECK-SAME:  attributes {sdy.original_func_name = "foo"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>}
- // CHECK-NEXT:    return
- 
- // -----
-@@ -355,22 +475,29 @@ sdy.mesh @mesh = #sdy.mesh<["a"=2, "b"=2, "c"=2]>
- 
- // CHECK-LABEL: func @simple_non_flat_non_matching_sharding_on_func_results_and_both_call_results(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
- // CHECK-NEXT:    call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"b"}]>]>} : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @foo_0(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"c"}]>]>} : (tensor<8xi32>) -> tensor<8xi32>
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func @simple_non_flat_non_matching_sharding_on_func_results_and_both_call_results(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"b"}]>]>} : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"b"}]>]>} : tensor<8xi32>
-   %1 = call @foo(%arg0) {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"c"}]>]>} : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  %edge2 = sdy.func_data_flow_edge %1 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"c"}]>]>} : tensor<8xi32>
-+  return %edge1, %edge2 : tensor<8xi32>, tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> (tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>}) {
-+// CHECK-NEXT:    sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>}
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32>) -> (tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>}) {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>} : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo_0(%arg0: tensor<8xi32>) -> (tensor<8xi32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}]>})
- // CHECK-SAME:  attributes {sdy.original_func_name = "foo"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"a"}]>]>}
- // CHECK-NEXT:    return
- 
- // -----
-@@ -379,37 +506,48 @@ sdy.mesh @mesh = <["a"=2]>
- 
- // CHECK-LABEL: func @simple_non_flat_with_manual_computations(
- // CHECK-NEXT:    call @foo(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    sdy.manual_computation
- // CHECK-NEXT:      stablehlo.concatenate
- // CHECK-NEXT:      func.call @bar_0
-+// CHECK-NEXT:      sdy.func_data_flow_edge
- // CHECK-NEXT:      sdy.return
- // CHECK-NEXT:    }
- // CHECK-NEXT:    return
- func.func @simple_non_flat_with_manual_computations(%arg0: tensor<8xi32>) -> (tensor<8xi32>, tensor<8xi32>) {
-   %0 = call @foo(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge1 = sdy.func_data_flow_edge %0 : tensor<8xi32>
-   %1 = sdy.manual_computation(%arg0) in_shardings=[<@mesh, [{"a"}]>] out_shardings=[<@mesh, [{"a"}]>] manual_axes={"a"} (%arg2: tensor<4xi32>) {
-     %2 = stablehlo.concatenate %arg2, %arg2, dim=0 : (tensor<4xi32>, tensor<4xi32>) -> tensor<8xi32>
-     %3 = func.call @bar(%2) : (tensor<8xi32>) -> tensor<8xi32>
-+    %edge3 = sdy.func_data_flow_edge %3 : tensor<8xi32>
-     sdy.return %arg2 : tensor<4xi32>
-   } : (tensor<8xi32>) -> tensor<8xi32>
--  return %0, %1 : tensor<8xi32>, tensor<8xi32>
-+  return %edge1, %1 : tensor<8xi32>, tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    call @bar(
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @foo(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  %1 = call @bar(%arg0) : (tensor<8xi32>) -> tensor<8xi32>
--  return %1 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  %1 = call @bar(%0) : (tensor<8xi32>) -> tensor<8xi32>
-+  %edge = sdy.func_data_flow_edge %1 : tensor<8xi32>
-+  return %edge : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- func.func private @bar(%arg0: tensor<8xi32>) -> tensor<8xi32> {
--  return %arg0 : tensor<8xi32>
-+  %0 = sdy.func_data_flow_edge %arg0 : tensor<8xi32>
-+  return %0 : tensor<8xi32>
- }
- 
- // CHECK-LABEL: func private @bar_0(%arg0: tensor<8xi32>) -> tensor<8xi32>
- // CHECK-SAME:  attributes {sdy.original_func_name = "bar"} {
-+// CHECK-NEXT:    sdy.func_data_flow_edge
- // CHECK-NEXT:    return
- 
-diff --git a/shardy/dialect/sdy/transforms/propagation/basic_propagation.cc b/shardy/dialect/sdy/transforms/propagation/basic_propagation.cc
-index 135a851..11776ae 100644
---- a/shardy/dialect/sdy/transforms/propagation/basic_propagation.cc
-+++ b/shardy/dialect/sdy/transforms/propagation/basic_propagation.cc
-@@ -497,15 +497,6 @@ class PropagateDataFlowEdgeOp : public OpRewritePattern<DataFlowEdgeOp> {
- 
-   LogicalResult matchAndRewrite(DataFlowEdgeOp dataFlowEdgeOp,
-                                 PatternRewriter& rewriter) const override {
--    // Skip non-shaped types (e.g., tokens), as we cannot create a sharding
--    // rule for them.
--    auto shapedType = dynCastStaticShapedType(dataFlowEdgeOp.getType());
--    if (!shapedType) {
--      return rewriter.notifyMatchFailure(dataFlowEdgeOp, [](Diagnostic& diag) {
--        diag << "non-shaped type (e.g., token)";
--      });
--    }
--
-     SmallVector<Value> sources = dataFlowEdgeOp.getSources();
-     SmallVector<TensorShardingAttr> operandShardingRef = getShardings(sources);
-     PropagationTensorParams operandsParams = PropagationTensorParams(
-@@ -535,7 +526,8 @@ class PropagateDataFlowEdgeOp : public OpRewritePattern<DataFlowEdgeOp> {
-         getDirectionToPropagate, dataFlowEdgeOp, std::placeholders::_1);
-     return propagateTensorShardings(
-         operandsParams, resultsParams,
--        createIdentityShardingRule(shapedType, sources.size()),
-+        createIdentityShardingRule(cast<ShapedType>(dataFlowEdgeOp.getType()),
-+                                   sources.size()),
-         directionAlongFactor, factorPropagation,
-         /*conservativePropagation=*/false, dataFlowEdgeOp, symbolTable,
-         &rewriter, shardingGroupMap);
-diff --git a/shardy/dialect/sdy/transforms/propagation/test/basic_propagation_token.mlir b/shardy/dialect/sdy/transforms/propagation/test/basic_propagation_token.mlir
-deleted file mode 100644
-index a259736..0000000
---- a/shardy/dialect/sdy/transforms/propagation/test/basic_propagation_token.mlir
-+++ /dev/null
-@@ -1,28 +0,0 @@
--// RUN: sdy_opt %s -split-input-file -sdy-add-data-flow-edges -sdy-basic-propagate -sdy-sink-data-flow-edges 2>&1 | FileCheck %s
--
--sdy.mesh @mesh_a_2_b_2 = <["a"=2, "b"=2]>
--
--// CHECK-LABEL: func @func_token_arg_skipped(
--// CHECK-SAME:      %arg0: !stablehlo.token) -> !stablehlo.token
--func.func @func_token_arg_skipped(%arg0: !stablehlo.token) -> !stablehlo.token {
--  // CHECK-NEXT: return %arg0 : !stablehlo.token
--  return %arg0 : !stablehlo.token
--}
--
--// -----
--sdy.mesh @mesh_a_2_b_2 = <["a"=2, "b"=2]>
--
--func.func private @callee(%arg0: !stablehlo.token, %arg1: tensor<4xi64>) -> (!stablehlo.token, tensor<4xi64>) {
--  return %arg0, %arg1 : !stablehlo.token, tensor<4xi64>
--}
--
--// CHECK-LABEL: func @main(
--// CHECK-SAME:      %arg0: !stablehlo.token,
--// CHECK-SAME:      %arg1: tensor<4xi64> {sdy.sharding = #sdy.sharding<@mesh_a_2_b_2, [{"a"}]>})
--func.func @main(%arg0: !stablehlo.token, %arg1: tensor<4xi64> {sdy.sharding = #sdy.sharding<@mesh_a_2_b_2, [{"a"}]>}) -> (!stablehlo.token, tensor<4xi64>) {
--  %0:2 = call @callee(%arg0, %arg1) : (!stablehlo.token, tensor<4xi64>) -> (!stablehlo.token, tensor<4xi64>)
--  // Add a use that expects sharding to verify propagation
--  %1 = sdy.sharding_constraint %0#1 <@mesh_a_2_b_2, [{"a"}]> : tensor<4xi64>
--  // CHECK: return %0#0, %1 : !stablehlo.token, tensor<4xi64>
--  return %0#0, %1 : !stablehlo.token, tensor<4xi64>
--}
-diff --git a/third_party/llvm/generated.patch b/third_party/llvm/generated.patch
-index 509398d..e61b277 100644
---- a/third_party/llvm/generated.patch
-+++ b/third_party/llvm/generated.patch
-@@ -1 +1,13 @@
- Auto generated patch. Do not edit or delete it, even if empty.
-+diff -ruN --strip-trailing-cr a/compiler-rt/test/cfi/icall/bad-signature.c b/compiler-rt/test/cfi/icall/bad-signature.c
-+--- a/compiler-rt/test/cfi/icall/bad-signature.c
-++++ b/compiler-rt/test/cfi/icall/bad-signature.c
-+@@ -17,7 +17,7 @@
-+   fprintf(stderr, "1\n");
-+ 
-+   // CFI-DIAG: runtime error: control flow integrity check for type 'void (int)' failed during indirect function call
-+-  // CFI-DIAG: bad-signature.c:[[@LINE-8]]: note: f defined here
-++  // CFI-DIAG: bad-signature.c:[[@LINE-8]]{{(:[0-9]+)?}}: note: f defined here
-+   ((void (*)(int))f)(42); // UB here
-+ 
-+   // CFI-NOT: 2
 diff --git a/third_party/llvm/workspace.bzl b/third_party/llvm/workspace.bzl
-index fa4f55d..dd3f1df 100644
+index 8b8a1226..bf16ff8f 100644
 --- a/third_party/llvm/workspace.bzl
 +++ b/third_party/llvm/workspace.bzl
 @@ -4,8 +4,8 @@ load("//third_party:repo.bzl", "tf_http_archive")
  
  def repo(name):
      """Imports LLVM."""
--    LLVM_COMMIT = "4d676e56f0ee819a20a021434a53060a43c33120"
--    LLVM_SHA256 = "a93e5dd2aa4606a565b8f60873b170cfad8589393a754d6c02719ea68330ab7b"
-+    LLVM_COMMIT = "a7c97252ed18839e87796dffd3926086ab62e8fd"
-+    LLVM_SHA256 = "49049408bdf9ae162b95b3eacfb8f9af226195e66636d0c9eff9a61d99be54c5"
+-    LLVM_COMMIT = "4f40fe10a4dae5405a41d4a47903711de7e0b77d"
+-    LLVM_SHA256 = "015f76315e6270721d837358718ecc7ef8692f8e44442d410262074d91e6d1ea"
++    LLVM_COMMIT = "0e6d57648584c3895abd3021fb8fa2a767146d5a"
++    LLVM_SHA256 = "bbd2acb1760bb6a3566a0ffa272f0828c4f2d8233be1759741023abb73910c44"
  
      tf_http_archive(
          name = name,
+diff --git a/third_party/stablehlo/temporary.patch b/third_party/stablehlo/temporary.patch
+index 8b137891..98e44999 100644
+--- a/third_party/stablehlo/temporary.patch
++++ b/third_party/stablehlo/temporary.patch
+@@ -1 +1,592 @@
++diff --ruN a/stablehlo/stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h b/stablehlo/stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h
++--- stablehlo/stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h
+++++ stablehlo/stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h
++@@ -163,22 +163,22 @@
++ //////////////////////
++ template <typename T>
++ typename std::enable_if<std::is_floating_point_v<T>,
++-                        std::complex<APFloat>>::type
+++                        mlir::Complex<APFloat>>::type
++ getComplexValue(std::complex<T> value, FloatType floatType) {
++   FloatAttr realAttr = getFloatAttr(value.real(), floatType);
++   FloatAttr imagAttr = getFloatAttr(value.imag(), floatType);
++-  return std::complex<APFloat>(realAttr.getValue(), imagAttr.getValue());
++-}
++-template <typename T>
++-std::complex<APFloat> getComplexValue(T value, FloatType floatType) {
+++  return mlir::Complex<APFloat>(realAttr.getValue(), imagAttr.getValue());
+++}
+++template <typename T>
+++mlir::Complex<APFloat> getComplexValue(T value, FloatType floatType) {
++   FloatAttr realAttr = getFloatAttr(value, floatType);
++-  return std::complex<APFloat>(realAttr.getValue(), toAPFloat(0.0, floatType));
++-}
++-template <typename T>
++-SmallVector<std::complex<APFloat>> getComplexValues(ArrayRef<T> values,
+++  return mlir::Complex<APFloat>(realAttr.getValue(), toAPFloat(0.0, floatType));
+++}
+++template <typename T>
+++SmallVector<mlir::Complex<APFloat>> getComplexValues(ArrayRef<T> values,
++                                                     FloatType floatType) {
++   return llvm::to_vector(
++-      llvm::map_range(values, [&](T value) -> std::complex<APFloat> {
+++      llvm::map_range(values, [&](T value) -> mlir::Complex<APFloat> {
++         return getComplexValue(value, floatType);
++       }));
++ }
++@@ -225,7 +225,7 @@
++           llvm::report_fatal_error(
++               "makeConstant with non-float complex type is unsupported.");
++ 
++-        std::complex<APFloat> complexValue =
+++        mlir::Complex<APFloat> complexValue =
++             detail::getComplexValue(value, floatType);
++         return DenseElementsAttr::get(tensorType, complexValue);
++       })
++@@ -262,7 +262,7 @@
++           llvm::report_fatal_error(
++               "makeConstant with non-float complex type is unsupported.");
++ 
++-        SmallVector<std::complex<APFloat>> complexValues =
+++        SmallVector<mlir::Complex<APFloat>> complexValues =
++             detail::getComplexValues(values, floatType);
++         return DenseElementsAttr::get(tensorType, complexValues);
++       })
++diff --ruN a/stablehlo/stablehlo/reference/Element.cpp b/stablehlo/stablehlo/reference/Element.cpp
++--- stablehlo/stablehlo/reference/Element.cpp
+++++ stablehlo/stablehlo/reference/Element.cpp
++@@ -120,7 +120,7 @@
++     return convert(type, floatFn(el.getFloatValue().convertToDouble()));
++ 
++   if (isSupportedComplexType(type))
++-    return convert(type, complexFn(std::complex<double>(
+++    return convert(type, complexFn(mlir::Complex<double>(
++                              el.getComplexValue().real().convertToDouble(),
++                              el.getComplexValue().imag().convertToDouble())));
++ 
++@@ -144,10 +144,10 @@
++ 
++   if (isSupportedComplexType(type)) {
++     return convert(
++-        type, complexFn(std::complex<double>(
+++        type, complexFn(mlir::Complex<double>(
++                             lhs.getComplexValue().real().convertToDouble(),
++                             lhs.getComplexValue().imag().convertToDouble()),
++-                        std::complex<double>(
+++                        mlir::Complex<double>(
++                             rhs.getComplexValue().real().convertToDouble(),
++                             rhs.getComplexValue().imag().convertToDouble())));
++   }
++@@ -223,7 +223,7 @@
++   value_ = value;
++ }
++ 
++-Element::Element(Type type, std::complex<APFloat> value) {
+++Element::Element(Type type, mlir::Complex<APFloat> value) {
++   if (!isSupportedComplexType(type))
++     report_fatal_error(invalidArgument("Unsupported element type: %s",
++                                        debugString(type).c_str()));
++@@ -264,12 +264,12 @@
++   return std::get<APFloat>(value_);
++ }
++ 
++-std::complex<APFloat> Element::getComplexValue() const {
+++mlir::Complex<APFloat> Element::getComplexValue() const {
++   if (!isSupportedComplexType(type_))
++     llvm::report_fatal_error("Element is not a complex value");
++ 
++   auto floatPair = std::get<std::pair<APFloat, APFloat>>(value_);
++-  return std::complex<APFloat>(floatPair.first, floatPair.second);
+++  return mlir::Complex<APFloat>(floatPair.first, floatPair.second);
++ }
++ 
++ APInt Element::toBits() const {
++@@ -328,8 +328,8 @@
++       [](APFloat lhs, APFloat rhs) -> APFloat {
++         llvm::report_fatal_error("float & float is unsupported");
++       },
++-      [](std::complex<APFloat> lhs,
++-         std::complex<APFloat> rhs) -> std::complex<APFloat> {
+++      [](mlir::Complex<APFloat> lhs,
+++         mlir::Complex<APFloat> rhs) -> mlir::Complex<APFloat> {
++         llvm::report_fatal_error("complex & complex is unsupported");
++       });
++ }
++@@ -339,11 +339,11 @@
++       *this, other, [](APInt lhs, APInt rhs) { return lhs * rhs; },
++       [](bool lhs, bool rhs) -> bool { return lhs & rhs; },
++       [](APFloat lhs, APFloat rhs) { return lhs * rhs; },
++-      [](std::complex<APFloat> lhs, std::complex<APFloat> rhs) {
++-        // TODO(#226): Use std::complex::operator*
+++      [](mlir::Complex<APFloat> lhs, mlir::Complex<APFloat> rhs) {
+++        // TODO(#226): Use mlir::Complex::operator*
++         auto resultReal = lhs.real() * rhs.real() - lhs.imag() * rhs.imag();
++         auto resultImag = lhs.real() * rhs.imag() + lhs.imag() * rhs.real();
++-        return std::complex<APFloat>(resultReal, resultImag);
+++        return mlir::Complex<APFloat>(resultReal, resultImag);
++       });
++ }
++ 
++@@ -352,11 +352,11 @@
++       *this, other, [](APInt lhs, APInt rhs) { return lhs + rhs; },
++       [](bool lhs, bool rhs) -> bool { return lhs | rhs; },
++       [](APFloat lhs, APFloat rhs) { return lhs + rhs; },
++-      [](std::complex<APFloat> lhs, std::complex<APFloat> rhs) {
++-        // TODO(#226): Use std::complex::operator+
+++      [](mlir::Complex<APFloat> lhs, mlir::Complex<APFloat> rhs) {
+++        // TODO(#226): Use mlir::Complex::operator+
++         auto resultReal = lhs.real() + rhs.real();
++         auto resultImag = lhs.imag() + rhs.imag();
++-        return std::complex<APFloat>(resultReal, resultImag);
+++        return mlir::Complex<APFloat>(resultReal, resultImag);
++       });
++ }
++ 
++@@ -367,7 +367,7 @@
++         llvm::report_fatal_error("-bool is unsupported");
++       },
++       [&](APFloat val) { return -val; },
++-      [](std::complex<APFloat> val) { return -val; });
+++      [](mlir::Complex<APFloat> val) { return -val; });
++ }
++ 
++ Element Element::operator-(const Element &other) const {
++@@ -377,11 +377,11 @@
++         llvm::report_fatal_error("bool - bool is unsupported");
++       },
++       [](APFloat lhs, APFloat rhs) { return lhs - rhs; },
++-      [](std::complex<APFloat> lhs, std::complex<APFloat> rhs) {
++-        // TODO(#226): Use std::complex::operator-
+++      [](mlir::Complex<APFloat> lhs, mlir::Complex<APFloat> rhs) {
+++        // TODO(#226): Use mlir::Complex::operator-
++         auto resultReal = lhs.real() - rhs.real();
++         auto resultImag = lhs.imag() - rhs.imag();
++-        return std::complex<APFloat>(resultReal, resultImag);
+++        return mlir::Complex<APFloat>(resultReal, resultImag);
++       });
++ }
++ 
++@@ -410,20 +410,20 @@
++   }
++ 
++   if (isSupportedComplexType(type)) {
++-    // TODO(#226): Use std::complex::operator/
+++    // TODO(#226): Use mlir::Complex::operator/
++     auto lhsVal = lhs.getComplexValue();
++     auto rhsVal = rhs.getComplexValue();
++     const llvm::fltSemantics &elSemantics = lhsVal.real().getSemantics();
++-    auto resultVal = std::complex<double>(lhsVal.real().convertToDouble(),
++-                                          lhsVal.imag().convertToDouble()) /
++-                     std::complex<double>(rhsVal.real().convertToDouble(),
++-                                          rhsVal.imag().convertToDouble());
+++    auto resultVal = mlir::Complex<double>(lhsVal.real().convertToDouble(),
+++                                           lhsVal.imag().convertToDouble()) /
+++                     mlir::Complex<double>(rhsVal.real().convertToDouble(),
+++                                           rhsVal.imag().convertToDouble());
++     bool roundingErr;
++     APFloat resultReal(resultVal.real());
++     resultReal.convert(elSemantics, APFloat::rmNearestTiesToEven, &roundingErr);
++     APFloat resultImag(resultVal.imag());
++     resultImag.convert(elSemantics, APFloat::rmNearestTiesToEven, &roundingErr);
++-    return Element(type, std::complex<APFloat>(resultReal, resultImag));
+++    return Element(type, mlir::Complex<APFloat>(resultReal, resultImag));
++   }
++ 
++   report_fatal_error(invalidArgument("Unsupported element type: %s",
++@@ -546,8 +546,8 @@
++       [](APFloat lhs, APFloat rhs) -> APFloat {
++         llvm::report_fatal_error("float ^ float is unsupported");
++       },
++-      [](std::complex<APFloat> lhs,
++-         std::complex<APFloat> rhs) -> std::complex<APFloat> {
+++      [](mlir::Complex<APFloat> lhs,
+++         mlir::Complex<APFloat> rhs) -> mlir::Complex<APFloat> {
++         llvm::report_fatal_error("complex ^ complex is unsupported");
++       });
++ }
++@@ -559,8 +559,8 @@
++       [](APFloat lhs, APFloat rhs) -> APFloat {
++         llvm::report_fatal_error("float | float is unsupported");
++       },
++-      [](std::complex<APFloat> lhs,
++-         std::complex<APFloat> rhs) -> std::complex<APFloat> {
+++      [](mlir::Complex<APFloat> lhs,
+++         mlir::Complex<APFloat> rhs) -> mlir::Complex<APFloat> {
++         llvm::report_fatal_error("complex | complex is unsupported");
++       });
++ }
++@@ -577,7 +577,7 @@
++       [](APFloat val) -> APFloat {
++         llvm::report_fatal_error("~float is unsupported");
++       },
++-      [](std::complex<APFloat> val) -> std::complex<APFloat> {
+++      [](mlir::Complex<APFloat> val) -> mlir::Complex<APFloat> {
++         llvm::report_fatal_error("~complex is unsupported");
++       });
++ }
++@@ -597,7 +597,7 @@
++ 
++   if (isSupportedComplexType(type)) {
++     auto elVal = el.getComplexValue();
++-    auto resultVal = std::abs(std::complex<double>(
+++    auto resultVal = std::abs(mlir::Complex<double>(
++         elVal.real().convertToDouble(), elVal.imag().convertToDouble()));
++     return convert(cast<ComplexType>(type).getElementType(), resultVal);
++   }
++@@ -642,7 +642,7 @@
++ 
++   if (isSupportedComplexType(type)) {
++     // atan2(y, x) = -i * log((x + i * y) / sqrt(x**2+y**2))
++-    auto i = convert(type, std::complex<double>(0.0, 1.0));
+++    auto i = convert(type, mlir::Complex<double>(0.0, 1.0));
++     return -i * log((e2 + i * e1) / sqrt(e2 * e2 + e1 * e1));
++   }
++ 
++@@ -699,11 +699,11 @@
++ Element cbrt(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::cbrt(e); },
++-      [](std::complex<double> e) {
+++      [](mlir::Complex<double> e) {
++         auto theta = std::atan2(e.imag(), e.real()) / 3.0;
++         return std::pow(std::pow(e.real(), 2.0) + std::pow(e.imag(), 2.0),
++                         1.0 / 6.0) *
++-               std::complex<double>(std::cos(theta), std::sin(theta));
+++               mlir::Complex<double>(std::cos(theta), std::sin(theta));
++       });
++ }
++ 
++@@ -716,8 +716,8 @@
++ Element complex(const Element &e1, const Element &e2) {
++   auto complexType = ComplexType::get(e1.getType());
++   if (isSupportedComplexType(complexType))
++-    return Element(complexType, std::complex<APFloat>(e1.getFloatValue(),
++-                                                      e2.getFloatValue()));
+++    return Element(complexType, mlir::Complex<APFloat>(e1.getFloatValue(),
+++                                                       e2.getFloatValue()));
++   report_fatal_error(invalidArgument("Unsupported element type: %s",
++                                      debugString(complexType).c_str()));
++ }
++@@ -791,7 +791,7 @@
++     return Element(type, value);
++   }
++   if (isSupportedComplexType(type))
++-    return convert(type, std::complex<APFloat>(value, APFloat(0.0)));
+++    return convert(type, mlir::Complex<APFloat>(value, APFloat(0.0)));
++   report_fatal_error(invalidArgument("Unsupported element type: %s",
++                                      debugString(type).c_str()));
++ }
++@@ -800,20 +800,20 @@
++   return convert(type, APFloat(value));
++ }
++ 
++-Element convert(Type type, std::complex<APFloat> value) {
+++Element convert(Type type, mlir::Complex<APFloat> value) {
++   if (isSupportedComplexType(type)) {
++     auto elementType = cast<ComplexType>(type).getElementType();
++     auto realElement = convert(elementType, value.real());
++     auto imagElement = convert(elementType, value.imag());
++-    return Element(type, std::complex<APFloat>(realElement.getFloatValue(),
++-                                               imagElement.getFloatValue()));
+++    return Element(type, mlir::Complex<APFloat>(realElement.getFloatValue(),
+++                                                imagElement.getFloatValue()));
++   }
++   return convert(type, value.real());
++ }
++ 
++-Element convert(Type type, std::complex<double> value) {
++-  return convert(type, std::complex<APFloat>(APFloat(value.real()),
++-                                             APFloat(value.imag())));
+++Element convert(Type type, mlir::Complex<double> value) {
+++  return convert(type, mlir::Complex<APFloat>(APFloat(value.real()),
+++                                              APFloat(value.imag())));
++ }
++ 
++ Element getZeroValueOfType(Type type) {
++@@ -825,7 +825,7 @@
++   if (isSupportedFloatType(type))
++     return convert(type, static_cast<APFloat>(0.0));
++   if (isSupportedComplexType(type))
++-    return convert(type, std::complex<APFloat>(APFloat(0.0), APFloat(0.0)));
+++    return convert(type, mlir::Complex<APFloat>(APFloat(0.0), APFloat(0.0)));
++   report_fatal_error(invalidArgument("Unsupported element type: %s",
++                                      debugString(type).c_str()));
++ }
++@@ -833,14 +833,14 @@
++ Element exponential(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::exp(e); },
++-      [](std::complex<double> e) { return std::exp(e); });
+++      [](mlir::Complex<double> e) { return std::exp(e); });
++ }
++ 
++ Element exponentialMinusOne(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::expm1(e); },
++-      [](std::complex<double> e) {
++-        return std::exp(e) - std::complex<double>(1.0, 0.0);
+++      [](mlir::Complex<double> e) {
+++        return std::exp(e) - mlir::Complex<double>(1.0, 0.0);
++       });
++ }
++ 
++@@ -873,20 +873,20 @@
++ Element cosine(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::cos(e); },
++-      [](std::complex<double> e) { return std::cos(e); });
+++      [](mlir::Complex<double> e) { return std::cos(e); });
++ }
++ 
++ Element log(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::log(e); },
++-      [](std::complex<double> e) { return std::log(e); });
+++      [](mlir::Complex<double> e) { return std::log(e); });
++ }
++ 
++ Element logPlusOne(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::log1p(e); },
++-      [](std::complex<double> e) {
++-        return std::log(e + std::complex<double>(1.0));
+++      [](mlir::Complex<double> e) {
+++        return std::log(e + mlir::Complex<double>(1.0));
++       });
++ }
++ 
++@@ -905,7 +905,7 @@
++       },
++       [](bool lhs, bool rhs) -> bool { return lhs | rhs; },
++       [](APFloat lhs, APFloat rhs) { return llvm::maximum(lhs, rhs); },
++-      [](std::complex<APFloat> lhs, std::complex<APFloat> rhs) {
+++      [](mlir::Complex<APFloat> lhs, mlir::Complex<APFloat> rhs) {
++         auto cmpRes = lhs.real().compare(rhs.real()) == APFloat::cmpEqual
++                           ? lhs.imag() > rhs.imag()
++                           : lhs.real() > rhs.real();
++@@ -923,7 +923,7 @@
++       },
++       [](bool lhs, bool rhs) -> bool { return lhs & rhs; },
++       [](APFloat lhs, APFloat rhs) { return llvm::minimum(lhs, rhs); },
++-      [](std::complex<APFloat> lhs, std::complex<APFloat> rhs) {
+++      [](mlir::Complex<APFloat> lhs, mlir::Complex<APFloat> rhs) {
++         auto cmpRes = lhs.real().compare(rhs.real()) == APFloat::cmpEqual
++                           ? lhs.imag() < rhs.imag()
++                           : lhs.real() < rhs.real();
++@@ -960,7 +960,7 @@
++ 
++   return mapWithUpcastToDouble(
++       e1, e2, [](double lhs, double rhs) { return std::pow(lhs, rhs); },
++-      [](std::complex<double> lhs, std::complex<double> rhs) {
+++      [](mlir::Complex<double> lhs, mlir::Complex<double> rhs) {
++         return std::pow(lhs, rhs);
++       });
++ }
++@@ -1056,8 +1056,8 @@
++         (void)lhs.mod(rhs);
++         return lhs;
++       },
++-      [](std::complex<APFloat> lhs,
++-         std::complex<APFloat> rhs) -> std::complex<APFloat> {
+++      [](mlir::Complex<APFloat> lhs,
+++         mlir::Complex<APFloat> rhs) -> mlir::Complex<APFloat> {
++         // TODO(#997): remove support for complex
++         llvm::report_fatal_error("rem(complex, complex) is not implemented");
++       });
++@@ -1080,7 +1080,7 @@
++ Element rsqrt(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return 1.0 / std::sqrt(e); },
++-      [](std::complex<double> e) { return 1.0 / std::sqrt(e); });
+++      [](mlir::Complex<double> e) { return 1.0 / std::sqrt(e); });
++ }
++ 
++ Element shiftLeft(const Element &e1, const Element &e2) {
++@@ -1119,13 +1119,14 @@
++     const llvm::fltSemantics &elSemantics = elVal.real().getSemantics();
++ 
++     if (elVal.real().isNaN() || elVal.imag().isNaN())
++-      return Element(type, std::complex<APFloat>(APFloat::getNaN(elSemantics),
++-                                                 APFloat::getNaN(elSemantics)));
+++      return Element(type,
+++                     mlir::Complex<APFloat>(APFloat::getNaN(elSemantics),
+++                                            APFloat::getNaN(elSemantics)));
++ 
++     if (elVal.real().isZero() && elVal.imag().isZero())
++       return Element(type,
++-                     std::complex<APFloat>(APFloat::getZero(elSemantics),
++-                                           APFloat::getZero(elSemantics)));
+++                     mlir::Complex<APFloat>(APFloat::getZero(elSemantics),
+++                                            APFloat::getZero(elSemantics)));
++ 
++     return el / convert(type, abs(el).getFloatValue());
++   }
++@@ -1137,25 +1138,25 @@
++ Element sine(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::sin(e); },
++-      [](std::complex<double> e) { return std::sin(e); });
+++      [](mlir::Complex<double> e) { return std::sin(e); });
++ }
++ 
++ Element sqrt(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::sqrt(e); },
++-      [](std::complex<double> e) { return std::sqrt(e); });
+++      [](mlir::Complex<double> e) { return std::sqrt(e); });
++ }
++ 
++ Element tan(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::tan(e); },
++-      [](std::complex<double> e) { return std::tan(e); });
+++      [](mlir::Complex<double> e) { return std::tan(e); });
++ }
++ 
++ Element tanh(const Element &el) {
++   return mapWithUpcastToDouble(
++       el, [](double e) { return std::tanh(e); },
++-      [](std::complex<double> e) { return std::tanh(e); });
+++      [](mlir::Complex<double> e) { return std::tanh(e); });
++ }
++ 
++ void Element::print(raw_ostream &os, bool elideType) const {
++diff --ruN a/stablehlo/stablehlo/reference/Element.h b/stablehlo/stablehlo/reference/Element.h
++--- stablehlo/stablehlo/reference/Element.h
+++++ stablehlo/stablehlo/reference/Element.h
++@@ -23,6 +23,7 @@
++ #include "llvm/Support/raw_ostream.h"
++ #include "mlir/IR/BuiltinTypes.h"
++ #include "mlir/IR/Types.h"
+++#include "mlir/Support/Complex.h"
++ 
++ namespace mlir {
++ namespace stablehlo {
++@@ -48,7 +49,7 @@
++ 
++   /// Initializes Element object with type `type` and value `value`. `type` must
++   /// be a complex type of the same semantics as `value`.
++-  Element(Type type, std::complex<APFloat> value);
+++  Element(Type type, mlir::Complex<APFloat> value);
++ 
++   Element(const Element &other) = default;
++   /// @}
++@@ -73,7 +74,7 @@
++ 
++   /// Returns the underlying complex value stored in an Element object with
++   /// complex type.
++-  std::complex<APFloat> getComplexValue() const;
+++  mlir::Complex<APFloat> getComplexValue() const;
++ 
++   /// Returns the implementation-defined bits of the underlying value.
++   APInt toBits() const;
++@@ -213,7 +214,7 @@
++ /// destination type), then then the behavior is TBD (#180). If the real part of
++ /// `value` cannot be exactly represented in the non-complex destination type,
++ /// then the behavior is also TBD (#180).
++-Element convert(Type type, std::complex<APFloat> value);
+++Element convert(Type type, mlir::Complex<APFloat> value);
++ 
++ /// Returns converted Element object of type `type` from source complex<double>
++ /// `value`. Only the real part of `value` is used to convert to non-complex
++@@ -222,7 +223,7 @@
++ /// destination type), then then the behavior is TBD (#180). If the real part of
++ /// `value` cannot be exactly represented in the non-complex destination type,
++ /// then the behavior is also TBD (#180).
++-Element convert(Type type, std::complex<double> value);
+++Element convert(Type type, mlir::Complex<double> value);
++ 
++ /// Returns Element object of type `type` from zero `value`
++ Element getZeroValueOfType(Type type);
++diff --ruN a/stablehlo/stablehlo/reference/Ops.cpp b/stablehlo/stablehlo/reference/Ops.cpp
++--- stablehlo/stablehlo/reference/Ops.cpp
+++++ stablehlo/stablehlo/reference/Ops.cpp
++@@ -1816,7 +1816,7 @@
++     auto N = operand.getShape()[dimension];
++ 
++     Element X(resultType.getElementType(),
++-              std::complex<APFloat>(APFloat(0.0), APFloat(0.0)));
+++              mlir::Complex<APFloat>(APFloat(0.0), APFloat(0.0)));
++ 
++     for (int n = 0; n < N; n++) {
++       auto operandIndex = Index(resultIndex);
++@@ -1860,7 +1860,7 @@
++     // compute IFFT as conjugation, FFT, conjugation and normalization
++     Tensor result(operand);
++     for (auto d = fftDims.begin(); d != fftDims.end(); ++d) {
++-      auto divisorValue = std::complex<APFloat>(
+++      auto divisorValue = mlir::Complex<APFloat>(
++           APFloat(static_cast<double>(resultType.getDimSize(*d))),
++           APFloat(0.0));
++       auto divisor =
++diff --ruN a/stablehlo/stablehlo/reference/Tensor.cpp b/stablehlo/stablehlo/reference/Tensor.cpp
++--- stablehlo/stablehlo/reference/Tensor.cpp
+++++ stablehlo/stablehlo/reference/Tensor.cpp
++@@ -191,16 +191,16 @@
++       auto elementData =
++           reinterpret_cast<const std::complex<float> *>(elementPtr);
++       return Element(elementType,
++-                     std::complex<APFloat>(APFloat(elementData->real()),
++-                                           APFloat(elementData->imag())));
+++                     mlir::Complex<APFloat>(APFloat(elementData->real()),
+++                                            APFloat(elementData->imag())));
++     }
++ 
++     if (complexElemTy.isF64()) {
++       auto elementData =
++           reinterpret_cast<const std::complex<double> *>(elementPtr);
++       return Element(elementType,
++-                     std::complex<APFloat>(APFloat(elementData->real()),
++-                                           APFloat(elementData->imag())));
+++                     mlir::Complex<APFloat>(APFloat(elementData->real()),
+++                                            APFloat(elementData->imag())));
++     }
++   }
++ 
++@@ -539,8 +539,8 @@
++     auto complexElemTy = cast<ComplexType>(elementType).getElementType();
++     if (complexElemTy.isF32()) {
++       auto complexValues = llvm::map_to_vector(
++-          attr.getValues<std::complex<APFloat>>(),
++-          [&](std::complex<APFloat> value) -> std::complex<float> {
+++          attr.getValues<mlir::Complex<APFloat>>(),
+++          [&](mlir::Complex<APFloat> value) -> std::complex<float> {
++             return std::complex<float>(value.real().convertToFloat(),
++                                        value.imag().convertToFloat());
++           });
++@@ -551,8 +551,8 @@
++     }
++     if (complexElemTy.isF64()) {
++       auto complexValues = llvm::map_to_vector(
++-          attr.getValues<std::complex<APFloat>>(),
++-          [&](std::complex<APFloat> value) -> std::complex<double> {
+++          attr.getValues<mlir::Complex<APFloat>>(),
+++          [&](mlir::Complex<APFloat> value) -> std::complex<double> {
++             return std::complex<double>(value.real().convertToDouble(),
++                                         value.imag().convertToDouble());
++           });
++diff --ruN a/stablehlo/stablehlo/transforms/StablehloLegalizeDeprecatedOps.cpp b/stablehlo/stablehlo/transforms/StablehloLegalizeDeprecatedOps.cpp
++--- stablehlo/stablehlo/transforms/StablehloLegalizeDeprecatedOps.cpp
+++++ stablehlo/stablehlo/transforms/StablehloLegalizeDeprecatedOps.cpp
++@@ -126,7 +126,7 @@
++       APFloat real(floatTy.getFloatSemantics(), rawValue);
++       APFloat imag = APFloat::getZero(floatTy.getFloatSemantics());
++       return DenseElementsAttr::get(scalarTy,
++-                                    std::complex<APFloat>(real, imag));
+++                                    mlir::Complex<APFloat>(real, imag));
++     }
++   }
++   llvm::report_fatal_error("unsupported type");
++diff --ruN a/stablehlo/stablehlo/transforms/optimization/StablehloAggressiveFolder.cpp b/stablehlo/stablehlo/transforms/optimization/StablehloAggressiveFolder.cpp
++--- stablehlo/stablehlo/transforms/optimization/StablehloAggressiveFolder.cpp
+++++ stablehlo/stablehlo/transforms/optimization/StablehloAggressiveFolder.cpp
++@@ -112,7 +112,7 @@
++         bool losesInfo;
++         apFloatZero.convert(realImagComponentFloatType.getFloatSemantics(),
++                             llvm::RoundingMode::NearestTiesToEven, &losesInfo);
++-        std::complex<APFloat> complexZeroScalar(apFloatZero, apFloatZero);
+++        mlir::Complex<APFloat> complexZeroScalar(apFloatZero, apFloatZero);
++         auto complexZeroSplat =
++             SplatElementsAttr::get(shapedType, complexZeroScalar);
++         return LazyPlaceholderValue(
+ 

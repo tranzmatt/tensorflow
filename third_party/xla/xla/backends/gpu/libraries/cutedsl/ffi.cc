@@ -13,10 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "xla/pjrt/gpu/tfrt/thread_checker.h"
+#include "xla/ffi/api/ffi.h"
 
-namespace xla {
+#include "xla/ffi/api/c_api.h"
 
-thread_local int TfrtGpuThreadChecker::depth_ = 0;
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CuteDSLRT_NvJaxCutlassCallPrepare);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CuteDSLRT_NvJaxCutlassCallExecute);
 
-}
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "CuteDSLRT_NvJaxCutlassCall",
+                         "CUDA",
+                         (XLA_FFI_Handler_Bundle{
+                             /*instantiate=*/nullptr,
+                             /*prepare=*/CuteDSLRT_NvJaxCutlassCallPrepare,
+                             /*initialize=*/nullptr,
+                             /*execute=*/CuteDSLRT_NvJaxCutlassCallExecute}));
