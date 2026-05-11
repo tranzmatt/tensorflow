@@ -17,6 +17,7 @@ limitations under the License.
 #define XLA_SERVICE_SPMD_SHARDY_UTILS_H_
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -65,6 +66,17 @@ void setFrontendAttribute(mlir::Operation* op, mlir::StringRef name,
 // that `value` will be turned into a `StringAttr`.
 void setFrontendAttribute(mlir::func::FuncOp funcOp, mlir::StringRef name,
                           mlir::Attribute value, int64_t argNum);
+
+// Sets `funcOp` argument at `index` w/ frontend attributes to `frontendAttrs`.
+void setFuncArgFrontendAttrs(
+    mlir::func::FuncOp funcOp, unsigned int index,
+    llvm::ArrayRef<mlir::NamedAttribute> frontendAttrs);
+
+// Remove `attributeName` from `frontendAttributes`.
+void removeFrontendAttribute(
+    mlir::DictionaryAttr frontendAttributes, mlir::StringRef attributeName,
+    std::function<void(llvm::ArrayRef<mlir::NamedAttribute>)> setAttr,
+    std::function<void()> removeAttr);
 
 // Remove `attributeName` from the frontend attributes of `op`.
 void removeFrontendAttribute(mlir::Operation* op,
@@ -187,6 +199,11 @@ bool isManualComputation(mlir::func::CallOp callOp, bool isInlineable = false);
 // 'inlineable' manual computation if `isInlineable` is false. Returns whether
 // the func is an 'inlineable' manual computation if `isInlineable` is true.
 bool isManualComputation(mlir::func::FuncOp funcOp, bool isInlineable = false);
+
+// Returns if `type` has a total size of one.
+//
+// In case `type` is not a static shaped type, returns false.
+bool isSizeOfOne(mlir::Type type);
 
 }  // namespace sdy
 }  // namespace xla

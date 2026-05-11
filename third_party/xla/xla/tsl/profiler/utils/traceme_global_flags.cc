@@ -1,4 +1,4 @@
-/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2026 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -12,11 +12,22 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-include "mlir/IR/OpBase.td"
-include "mlir/IR/PatternBase.td"
-include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.td"
 
-// Note that this may not be a valid transformation for general tensorflow
-// program, but from the perspective of mlir-reduce, it's worth to give it a try
-// because the validity will be checked separately by the tester.
-def : Pat<(TF_IdentityOp (TF_IdentityOp $arg)), (TF_IdentityOp $arg)>;
+#include "xla/tsl/profiler/utils/traceme_global_flags.h"
+
+#include <atomic>
+
+namespace tsl {
+namespace profiler {
+
+#ifdef _WIN32
+#define DECL_DLL_EXPORT __declspec(dllexport)
+#else
+#define DECL_DLL_EXPORT
+#endif
+// DLL imported variables cannot be initialized on Windows. This file is
+// included only on DLL exports.
+DECL_DLL_EXPORT std::atomic<bool> g_enable_source_location(true);
+
+}  // namespace profiler
+}  // namespace tsl
