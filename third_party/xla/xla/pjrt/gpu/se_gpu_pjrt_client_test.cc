@@ -66,6 +66,7 @@ limitations under the License.
 #include "xla/hlo/parser/hlo_parser.h"
 #include "xla/hlo/testlib/test.h"
 #include "xla/layout.h"
+#include "xla/layout_util.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
 #include "xla/pjrt/device_event.h"
@@ -1520,16 +1521,33 @@ TEST(StreamExecutorGpuClientTest, GetTopologyDescriptionWithGlobalDevicesTest) {
 TEST(PjRtCpuClientTest, CopyToMemorySpace) {
   TF_ASSERT_OK_AND_ASSIGN(auto client,
                           GetStreamExecutorGpuClient(DefaultOptions()));
+  xla::Shape shape = xla::ShapeUtil::MakeShape(S32, {128, 256});
+  TF_ASSERT_OK_AND_ASSIGN(auto literal, xla::MakeFakeLiteral(shape));
   for (auto* memory_space : client->memory_spaces()) {
-    xla::Shape shape = xla::ShapeUtil::MakeShape(S32, {128, 256});
-    TF_ASSERT_OK_AND_ASSIGN(auto literal, xla::MakeFakeLiteral(shape));
     TF_ASSERT_OK_AND_ASSIGN(
         auto buffer, client->BufferFromHostLiteral(literal, memory_space));
     TF_ASSERT_OK_AND_ASSIGN(buffer,
                             buffer->CopyToMemorySpace(buffer->memory_space()));
     TF_ASSERT_OK_AND_ASSIGN(auto received_literal, buffer->ToLiteral().Await());
-    EXPECT_THAT(received_literal->data<int32_t>(),
-                ElementsAreArray(literal.data<int32_t>()));
+    EXPECT_EQ(*received_literal, literal);
+  }
+}
+
+TEST(PjRtCpuClientTest, CopyToMemorySpaceWithCustomLayout) {
+  TF_ASSERT_OK_AND_ASSIGN(auto client,
+                          GetStreamExecutorGpuClient(DefaultOptions()));
+  xla::Shape shape = xla::ShapeUtil::MakeShape(S32, {128, 256});
+  TF_ASSERT_OK_AND_ASSIGN(auto literal, xla::MakeFakeLiteral(shape));
+  Layout device_layout = LayoutUtil::MakeAscendingLayout(2);
+  for (auto* memory_space : client->memory_spaces()) {
+    TF_ASSERT_OK_AND_ASSIGN(
+        auto buffer,
+        client->BufferFromHostLiteral(literal, memory_space, &device_layout));
+    TF_ASSERT_OK_AND_ASSIGN(buffer,
+                            buffer->CopyToMemorySpace(buffer->memory_space()));
+    EXPECT_EQ(buffer->layout()->xla_layout(), device_layout);
+    TF_ASSERT_OK_AND_ASSIGN(auto received_literal, buffer->ToLiteral().Await());
+    EXPECT_EQ(*received_literal, literal);
   }
 }
 
@@ -2107,7 +2125,7 @@ TEST(StreamExecutorGpuClientTest,
   if (client->platform_name() == xla::RocmName()) {
     EXPECT_EQ(memory_stats.peak_memory_in_bytes, 1845006788);
   } else {
-    EXPECT_EQ(memory_stats.peak_memory_in_bytes, 1845010888);
+    EXPECT_EQ(memory_stats.peak_memory_in_bytes, 2165875144);
   }
 }
 
@@ -2146,7 +2164,7 @@ ROOT tuple = (f32[16]{0}, f32[2]{0}, f32[2]{0}) tuple(ag, p0, add0)
 
   EXPECT_EQ(memory_stats.output_size_in_bytes, 104);
   EXPECT_EQ(memory_stats.host_output_size_in_bytes, 0);
-  EXPECT_EQ(memory_stats.peak_memory_in_bytes, 120);
+  EXPECT_EQ(memory_stats.peak_memory_in_bytes, 184);
 }
 
 TEST(StreamExecutorGpuClientTest, GetCompiledMemoryStatsMixedTupleNotRoot) {
@@ -2178,7 +2196,7 @@ ROOT gte0 = f32[16]{0} get-tuple-element(t), index=0
 
   EXPECT_EQ(memory_stats.output_size_in_bytes, 64);
   EXPECT_EQ(memory_stats.host_output_size_in_bytes, 0);
-  EXPECT_EQ(memory_stats.peak_memory_in_bytes, 80);
+  EXPECT_EQ(memory_stats.peak_memory_in_bytes, 144);
 }
 
 TEST(StreamExecutorGpuClientTest, GetCompiledMemoryStatsCountTupleTable) {
@@ -2264,7 +2282,8 @@ TEST(StreamExecutorGpuClientTest,
   TF_ASSERT_OK(result_buffers[0]->GetReadyFuture().Await());
   Shape result_shape = result_buffers[0]->on_device_shape();
   auto memory_space = result_shape.layout().memory_space();
-  EXPECT_EQ(memory_space, 1);
+  // Entry results should be copied from S1 to S0 memory space.
+  EXPECT_EQ(memory_space, 0);
 }
 
 TEST(StreamExecutorGpuClientTest, CollectiveMemorySpaceSmoke) {
@@ -2297,9 +2316,9 @@ TEST(StreamExecutorGpuClientTest, CollectiveMemorySpaceSmoke) {
   auto& buf = results[0][0];
   TF_ASSERT_OK(buf->GetReadyFuture().Await());
 
-  // Override default memory space to collective memory space.
+  // Entry results should be copied from S1 to S0 memory space.
   EXPECT_EQ(buf->on_device_shape().layout().memory_space(),
-            (int)gpu::MemorySpaceColor::kCollective);
+            (int)gpu::MemorySpaceColor::kDefault);
 }
 
 TEST(StreamExecutorGpuClientTest,

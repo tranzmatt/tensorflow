@@ -78,11 +78,13 @@ limitations under the License.
 #include "xla/stream_executor/rocm/rocm_context.h"
 #include "xla/stream_executor/rocm/rocm_event.h"
 #include "xla/stream_executor/rocm/rocm_kernel.h"
+#include "xla/stream_executor/rocm/rocm_pcie_bandwidth.h"
 #include "xla/stream_executor/rocm/rocm_platform_id.h"
 #include "xla/stream_executor/rocm/rocm_status.h"
 #include "xla/stream_executor/rocm/rocm_stream.h"
 #include "xla/stream_executor/rocm/rocm_timer.h"
 #include "xla/stream_executor/rocm/rocm_version_parser.h"
+#include "xla/stream_executor/rocm/rocm_xgmi_topology.h"
 #include "xla/stream_executor/semantic_version.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
@@ -722,14 +724,13 @@ absl::StatusOr<std::unique_ptr<Kernel>> RocmExecutor::LoadKernel(
   } else {
     const auto& packing_spec =
         std::get<KernelArgsPackingSpec>(spec.kernel_args_packing());
-    rocm_kernel->set_args_packing([packing_spec](const Kernel& kernel,
-                                                 const KernelArgs& args) {
-      const auto& mem_args =
-          stream_executor::Cast<stream_executor::KernelArgsDeviceAddressArray>(
-              &args);
-      return packing_spec.BuildArguments(mem_args->device_addr_args(),
-                                         args.number_of_shared_bytes());
-    });
+    rocm_kernel->set_args_packing(
+        [packing_spec](const Kernel& kernel, const KernelArgs& args) {
+          const PackableKernelArgs& mem_args =
+              dynamic_cast<const PackableKernelArgs&>(args);
+          return packing_spec.BuildArguments(mem_args.packed_args(),
+                                             args.number_of_shared_bytes());
+        });
   }
   return std::move(rocm_kernel);
 }
@@ -1132,13 +1133,10 @@ RocmExecutor::CreateDeviceDescription(int device_ordinal) {
 
   DeviceDescription desc;
 
+  std::string pci_bus_id = GetPCIBusID(device);
+  pci_bus_id = absl::AsciiStrToLower(pci_bus_id);
+  desc.set_pci_bus_id(pci_bus_id);
   {
-    std::string pci_bus_id = GetPCIBusID(device);
-
-    // Lower the hex characters to match sysfs.
-    pci_bus_id = absl::AsciiStrToLower(pci_bus_id);
-    desc.set_pci_bus_id(pci_bus_id);
-
     // Read the NUMA node corresponding to the PCI bus ID out of sysfs.
     std::optional<int> numa_node = ReadNumaNode(pci_bus_id, device_ordinal);
     // If the kernel reports -1, adjust to 0; leave as -1 if no value could be
@@ -1169,8 +1167,29 @@ RocmExecutor::CreateDeviceDescription(int device_ordinal) {
     desc.set_l2_cache_size(prop.l2CacheSize);
   }
 
-  // PCIe bandwidth for PCI Gen4 x16 (approximate)
-  desc.set_pcie_bandwidth(32LL * 1024 * 1024 * 1024);
+  {
+    std::optional<int64_t> pcie_bw = gpu::GetRocmPcieBandwidth(pci_bus_id);
+    if (pcie_bw.has_value()) {
+      desc.set_pcie_bandwidth(*pcie_bw);
+    } else {
+      LOG(WARNING) << "Could not determine PCIe bandwidth for device "
+                   << device_ordinal
+                   << " via rocm_smi. Assuming PCIe Gen4 x16.";
+      desc.set_pcie_bandwidth(32LL * 1024 * 1024 * 1024);
+    }
+  }
+
+  {
+    gpu::XgmiTopologyInfo xgmi = gpu::GetRocmXgmiTopology(pci_bus_id);
+    if (xgmi.active_links > 0) {
+      DeviceInterconnectInfo info;
+      info.active_links = xgmi.active_links;
+      desc.set_device_interconnect_info(info);
+      VLOG(1) << "Device " << device_ordinal << ": detected "
+              << xgmi.active_links << " active xGMI links"
+              << " (hive_id=" << xgmi.hive_id << ")";
+    }
+  }
 
   {
     auto ecc_enabled_or = IsEccEnabled(device);

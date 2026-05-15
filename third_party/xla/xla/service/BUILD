@@ -3784,6 +3784,20 @@ cc_library(
     ],
 )
 
+xla_cc_test(
+    name = "hlo_value_test",
+    srcs = ["hlo_value_test.cc"],
+    deps = [
+        ":hlo_module_config",
+        ":hlo_value",
+        "//xla:shape_util",
+        "//xla/hlo/ir:hlo",
+        "//xla/tests:xla_internal_test_main",
+        "//xla/tsl/platform:test_benchmark",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
 cc_library(
     name = "hlo_value",
     srcs = ["hlo_value.cc"],
@@ -6705,6 +6719,7 @@ cc_library(
         ":shaped_slice_proto_cc",
         "//xla:shape_util",
         "//xla/tsl/platform:statusor",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
     ],

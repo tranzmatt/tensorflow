@@ -338,7 +338,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
       DebugOptions::PARTITIONING_ALGORITHM_NOOP);
 
   opts.set_xla_gpu_enable_triton_gemm(true);
-  opts.set_xla_gpu_unsupported_enable_triton_multi_output_fusion(true);
+  opts.set_xla_gpu_unsupported_enable_triton_multi_output_fusion(false);
   opts.set_xla_gpu_enable_cudnn_int8x32_convolution_reordering(true);
   opts.set_xla_gpu_triton_gemm_any(true);
   opts.set_xla_gpu_experimental_gemm_fusion_v2(false);
@@ -488,6 +488,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_experimental_all_fusions_with_triton(false);
   opts.set_xla_gpu_experimental_ragged_all_to_all_use_barrier(true);
   opts.set_xla_gpu_experimental_use_ragged_dot_grouped_gemm(true);
+  opts.set_xla_gpu_native_emitter_tune_unroll_factor_for_loops(false);
 
   opts.set_xla_cpu_collective_call_warn_stuck_seconds(20);
   opts.set_xla_cpu_collective_call_terminate_timeout_seconds(40);
@@ -495,6 +496,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
 
   opts.set_xla_keep_shardings_after_spmd(false);
   opts.set_xla_enable_hlo_sharding_v3(false);
+  opts.set_xla_enable_rgv3_materialization(true);
   opts.set_xla_gpu_experimental_enable_checksum_tracing_on_thunks(false);
   opts.set_xla_gpu_experimental_enable_buffer_saver_on_thunks(false);
 
@@ -2954,12 +2956,28 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
           ->xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl(),
       "If true, use the MultiGpuBarrierWithNcclKernel in one-shot "
       "RaggedAllToAll thunk."));
+  // TODO: b/482045400 - Remove double-copy approach once testing is complete.
+  flag_list->push_back(tsl::Flag(
+      "xla_gpu_experimental_ragged_all_to_all_zero_copy",
+      bool_setter_for(
+          &DebugOptions::set_xla_gpu_experimental_ragged_all_to_all_zero_copy),
+      debug_options->xla_gpu_experimental_ragged_all_to_all_zero_copy(),
+      "If true, use the Symmetric Memory mode for "
+      "MultiGpuBarrierWithNcclKernel"));
   flag_list->push_back(tsl::Flag(
       "xla_gpu_experimental_use_ragged_dot_grouped_gemm",
       bool_setter_for(
           &DebugOptions::set_xla_gpu_experimental_use_ragged_dot_grouped_gemm),
       debug_options->xla_gpu_experimental_use_ragged_dot_grouped_gemm(),
       "If true, use grouped GEMM (hipBLASLt) for ragged dot operations."));
+  flag_list->push_back(tsl::Flag(
+      "xla_gpu_native_emitter_tune_unroll_factor_for_loops",
+      bool_setter_for(
+          &DebugOptions::
+              set_xla_gpu_native_emitter_tune_unroll_factor_for_loops),
+      debug_options->xla_gpu_native_emitter_tune_unroll_factor_for_loops(),
+      "Experimental: If set, autotune the unroll factor for loop fusions in "
+      "native emitter."));
   flag_list->push_back(tsl::Flag(
       "xla_gpu_experimental_use_ragged_dot_fusion",
       bool_setter_for(
@@ -3001,6 +3019,13 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
                 debug_options->xla_enable_hlo_sharding_v3(),
                 "If true, use HloShardingV3 which is a mesh and axis based "
                 "sharding representation."));
+  flag_list->push_back(tsl::Flag(
+      "xla_enable_rgv3_materialization",
+      bool_setter_for(&DebugOptions::set_xla_enable_rgv3_materialization),
+      debug_options->xla_enable_rgv3_materialization(),
+      "If true, opportunistically materialize MeshAxesReplicaGroupList "
+      "(RGV3) in SPMD partitioner. If false, fallback to legacy V1/V2 "
+      "representations."));
   flag_list->push_back(tsl::Flag(
       "xla_gpu_experimental_enable_checksum_tracing_on_thunks",
       bool_setter_for(

@@ -1115,8 +1115,9 @@ absl::StatusOr<std::unique_ptr<Kernel>> CudaExecutor::LoadKernel(
         std::get<KernelArgsPackingSpec>(spec.kernel_args_packing());
     cuda_kernel->set_args_packing(
         [packing_spec](const Kernel& kernel, const KernelArgs& args) {
-          const auto& mem_args = Cast<KernelArgsDeviceAddressArray>(&args);
-          return packing_spec.BuildArguments(mem_args->device_addr_args(),
+          const PackableKernelArgs& mem_args =
+              dynamic_cast<const PackableKernelArgs&>(args);
+          return packing_spec.BuildArguments(mem_args.packed_args(),
                                              args.number_of_shared_bytes());
         });
   }
@@ -1718,7 +1719,7 @@ CudaExecutor::CreateDeviceDescription(int device_ordinal) {
         LOG(ERROR) << p2p_link_count;
       }
       // nvmlDeviceGetGpuFabricInfoV is only available in driver r545+
-      if (desc.kernel_mode_driver_version().major() >= 545) {  // NOLINT
+      if (desc.kernel_mode_driver_version().major_version() >= 545) {  // NOLINT
         absl::StatusOr<FabricInfo> fabric_info = GetDeviceFabricInfo(*device);
         if (fabric_info.ok()) {
           info.cluster_uuid = fabric_info->cluster_uuid;

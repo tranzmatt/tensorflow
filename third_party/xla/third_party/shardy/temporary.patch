@@ -1,227 +1,332 @@
-diff --git a/shardy/dialect/sdy/transforms/import/lift_inlined_meshes.cc b/shardy/dialect/sdy/transforms/import/lift_inlined_meshes.cc
-index 7c46ca9d..2722b45d 100644
---- a/shardy/dialect/sdy/transforms/import/lift_inlined_meshes.cc
-+++ b/shardy/dialect/sdy/transforms/import/lift_inlined_meshes.cc
-@@ -26,7 +26,6 @@ limitations under the License.
- #include "mlir/IR/Builders.h"
- #include "mlir/IR/BuiltinAttributes.h"
- #include "mlir/IR/BuiltinOps.h"
--#include "mlir/IR/MLIRContext.h"
- #include "mlir/IR/SymbolTable.h"
- #include "mlir/Support/LLVM.h"
- #include "shardy/dialect/sdy/ir/constants.h"
-@@ -73,35 +72,6 @@ MeshOp createNewMeshOp(Location loc, mlir::stablehlo::MeshAttr mesh,
-   return createMesh("mesh", sdyMeshAttr);
- }
- 
--DictionaryAttr getStablehloMeshAttrAsDict(MeshAttr sdyMeshAttr) {
--  MLIRContext* ctx = sdyMeshAttr.getContext();
--  Builder builder(ctx);
--
--  SmallVector<Attribute> axesAttrs;
--  for (MeshAxisAttr axisAttr : sdyMeshAttr.getAxes()) {
--    NamedAttribute nameAttr =
--        builder.getNamedAttr("name", builder.getStringAttr(axisAttr.getName()));
--    NamedAttribute sizeAttr = builder.getNamedAttr(
--        "size", builder.getI64IntegerAttr(axisAttr.getSize()));
--    axesAttrs.push_back(builder.getDictionaryAttr({nameAttr, sizeAttr}));
--  }
--  ArrayAttr axesArrayAttr = builder.getArrayAttr(axesAttrs);
--
--  SmallVector<NamedAttribute> dictFields;
--  dictFields.push_back(builder.getNamedAttr("axes", axesArrayAttr));
--
--  if (!sdyMeshAttr.getDeviceIds().empty()) {
--    auto type = RankedTensorType::get(
--        {static_cast<int64_t>(sdyMeshAttr.getDeviceIds().size())},
--        builder.getI64Type());
--    auto deviceIds =
--        DenseIntElementsAttr::get(type, sdyMeshAttr.getDeviceIds());
--    dictFields.push_back(builder.getNamedAttr("device_ids", deviceIds));
--  }
--
--  return builder.getDictionaryAttr(dictFields);
--}
--
- TensorShardingAttr replaceMesh(TensorShardingAttr sharding,
-                                StringAttr meshName) {
-   return TensorShardingAttr::get(
-@@ -226,14 +196,6 @@ struct LiftInlinedMeshesPass
-     moduleOp.walk([&](stablehlo::CollectiveBroadcastOp op) {
-       processMeshInReplicaGroups(op);
-     });
--
--    // Attach discardable `stablehlo.mesh` attributes to all named meshes.
--    for (auto meshOp : llvm::make_early_inc_range(moduleOp.getOps<MeshOp>())) {
--      if (!meshOp->hasAttr("stablehlo.mesh")) {
--        meshOp->setAttr("stablehlo.mesh",
--                        getStablehloMeshAttrAsDict(meshOp.getMesh()));
--      }
--    }
-   }
- };
- 
-diff --git a/shardy/dialect/sdy/transforms/import/test/lift_inlined_meshes.mlir b/shardy/dialect/sdy/transforms/import/test/lift_inlined_meshes.mlir
-index f45829cd..de18acb6 100644
---- a/shardy/dialect/sdy/transforms/import/test/lift_inlined_meshes.mlir
-+++ b/shardy/dialect/sdy/transforms/import/test/lift_inlined_meshes.mlir
-@@ -256,17 +256,3 @@ func.func private @foo(%arg0: tensor<8x8xf32> {sdy.sharding = #sdy.sharding<@mes
-   %0 = stablehlo.negate %arg0 {sdy.sharding = #sdy.sharding_per_value<[<@mesh, [{"x"}, {}]>]>} : tensor<8x8xf32>
-   return %0 : tensor<8x8xf32>
- }
--
--// -----
--
--// CHECK: sdy.mesh @mesh = <["a"=4]> {stablehlo.mesh = {axes = [{name = "a", size = 4 : i64}]}}
--sdy.mesh @mesh = <["a"=4]>
--
--// CHECK: sdy.mesh @mesh_0 = <["b"=2]> {stablehlo.mesh = {axes = [{name = "b", size = 2 : i64}]}}
--
--// CHECK-LABEL: func @tagged_stablehlo_mesh_attribute
--func.func @tagged_stablehlo_mesh_attribute(%arg0: tensor<4x4xf32> {sdy.sharding = #sdy.sharding<@mesh, [{"a"}, {}]>}, %arg1: tensor<4x4xf32>) -> tensor<4x4xf32> {
--  // CHECK-NEXT: stablehlo.add %arg0, %arg1 {sdy.sharding = #sdy.sharding_per_value<[<@mesh_0, [{"b"}, {}]>]>}
--  %0 = stablehlo.add %arg0, %arg1 {sdy.sharding = #sdy.sharding_per_value<[<mesh<["b"=2]>, [{"b"}, {}]>]>} : tensor<4x4xf32>
--  return %0 : tensor<4x4xf32>
--}
-diff --git a/shardy/dialect/sdy/transforms/propagation/test/propagation_pipeline.mlir b/shardy/dialect/sdy/transforms/propagation/test/propagation_pipeline.mlir
-index f021e075..a80a25a3 100644
---- a/shardy/dialect/sdy/transforms/propagation/test/propagation_pipeline.mlir
-+++ b/shardy/dialect/sdy/transforms/propagation/test/propagation_pipeline.mlir
-@@ -1,4 +1,4 @@
--// RUN: sdy_opt %s -split-input-file -sdy-propagation-pipeline | FileCheck %s
-+// RUN: sdy_opt %s -split-input-file -sdy-propagation-pipeline 2>&1 | FileCheck %s
- 
- sdy.mesh @mesh = <["a"=2, "b"=2, "c"=2]>
- 
+diff --git a/third_party/llvm/generated.patch b/third_party/llvm/generated.patch
+index 73e4793b..91eae702 100644
+--- a/third_party/llvm/generated.patch
++++ b/third_party/llvm/generated.patch
+@@ -1,300 +1,15 @@
+ Auto generated patch. Do not edit or delete it, even if empty.
+-diff -ruN --strip-trailing-cr a/mlir/lib/Pass/IRPrinting.cpp b/mlir/lib/Pass/IRPrinting.cpp
+---- a/mlir/lib/Pass/IRPrinting.cpp
+-+++ b/mlir/lib/Pass/IRPrinting.cpp
+-@@ -48,11 +48,18 @@
+- 
+- static void printIR(Operation *op, bool printModuleScope, raw_ostream &out,
+-                     OpPrintingFlags flags) {
+--  // Check to see if we are not printing at module scope.
+-+  // Otherwise, check to see if we are not printing at module scope.
+-   if (!printModuleScope)
+--    return op->print(out, op->getBlock() ? flags.useLocalScope() : flags);
+-+    return op->print(out << " //----- //\n",
+-+                     op->getBlock() ? flags.useLocalScope() : flags);
+- 
+-   // Otherwise, we are printing at module scope.
+-+  out << " ('" << op->getName() << "' operation";
+-+  if (auto symbolName =
+-+          op->getAttrOfType<StringAttr>(SymbolTable::getSymbolAttrName()))
+-+    out << ": @" << symbolName.getValue();
+-+  out << ") //----- //\n";
+-+
+-   // Find the top-level operation.
+-   auto *topLevelOp = op;
+-   while (auto *parentOp = topLevelOp->getParentOp())
+-@@ -60,24 +67,6 @@
+-   topLevelOp->print(out, flags);
+- }
+- 
+--static void printIRHeader(raw_ostream &out, StringRef title, Pass *pass,
+--                          Operation *op, bool printModuleScope,
+--                          bool failed = false) {
+--  out << "// -----// IR Dump " << title << " " << pass->getName();
+--  if (failed)
+--    out << " Failed";
+--  out << ": ";
+--  pass->printAsTextualPipeline(out);
+--  if (printModuleScope) {
+--    out << " ('" << op->getName() << "' operation";
+--    if (auto symbolName =
+--            op->getAttrOfType<StringAttr>(SymbolTable::getSymbolAttrName()))
+--      out << ": @" << symbolName.getValue();
+--    out << ")";
+--  }
+--  out << " //----- //\n";
+--}
+--
+- /// Instrumentation hooks.
+- void IRPrinterInstrumentation::runBeforePass(Pass *pass, Operation *op) {
+-   if (isa<OpToOpPassAdaptor>(pass))
+-@@ -87,7 +76,8 @@
+-     beforePassFingerPrints.try_emplace(pass, op);
+- 
+-   config->printBeforeIfEnabled(pass, op, [&](raw_ostream &out) {
+--    printIRHeader(out, "Before", pass, op, config->shouldPrintAtModuleScope());
+-+    out << "// -----// IR Dump Before " << pass->getName() << " ("
+-+        << pass->getArgument() << ")";
+-     printIR(op, config->shouldPrintAtModuleScope(), out,
+-             config->getOpPrintingFlags());
+-     out << "\n\n";
+-@@ -117,7 +107,8 @@
+-   }
+- 
+-   config->printAfterIfEnabled(pass, op, [&](raw_ostream &out) {
+--    printIRHeader(out, "After", pass, op, config->shouldPrintAtModuleScope());
+-+    out << "// -----// IR Dump After " << pass->getName() << " ("
+-+        << pass->getArgument() << ")";
+-     printIR(op, config->shouldPrintAtModuleScope(), out,
+-             config->getOpPrintingFlags());
+-     out << "\n\n";
+-@@ -131,8 +122,8 @@
+-     beforePassFingerPrints.erase(pass);
+- 
+-   config->printAfterIfEnabled(pass, op, [&](raw_ostream &out) {
+--    printIRHeader(out, "After", pass, op, config->shouldPrintAtModuleScope(),
+--                  /*failed=*/true);
+-+    out << formatv("// -----// IR Dump After {0} Failed ({1})", pass->getName(),
+-+                   pass->getArgument());
+-     printIR(op, config->shouldPrintAtModuleScope(), out,
+-             config->getOpPrintingFlags());
+-     out << "\n\n";
+-diff -ruN --strip-trailing-cr a/mlir/test/Pass/dynamic-pipeline.mlir b/mlir/test/Pass/dynamic-pipeline.mlir
+---- a/mlir/test/Pass/dynamic-pipeline.mlir
+-+++ b/mlir/test/Pass/dynamic-pipeline.mlir
+-@@ -10,20 +10,20 @@
+- 
+- // CHECK: IR Dump Before
+- // CHECK-SAME: TestDynamicPipelinePass
+--// CHECK: module @inner_mod1
+-+// CHECK-NEXT: module @inner_mod1
+- // MOD2-ONLY: dynamic-pipeline skip op name: inner_mod1
+- module @inner_mod1 {
+- // MOD1: Dump Before CSE
+--// MOD1: @foo
+-+// MOD1-NEXT: @foo
+- // MOD1: Dump Before Canonicalizer
+--// MOD1: @foo
+-+// MOD1-NEXT: @foo
+-   func.func @foo() {
+-     return
+-   }
+- // MOD1: Dump Before CSE
+--// MOD1: @baz
+-+// MOD1-NEXT: @baz
+- // MOD1: Dump Before Canonicalizer
+--// MOD1: @baz
+-+// MOD1-NEXT: @baz
+-   func.func @baz() {
+-     return
+-   }
+-@@ -31,13 +31,13 @@
+- 
+- // CHECK: IR Dump Before
+- // CHECK-SAME: TestDynamicPipelinePass
+--// CHECK: module @inner_mod2
+-+// CHECK-NEXT: module @inner_mod2
+- // MOD1-ONLY: dynamic-pipeline skip op name: inner_mod2
+- module @inner_mod2 {
+- // MOD2: Dump Before CSE
+--// MOD2: @foo
+-+// MOD2-NEXT: @foo
+- // MOD2: Dump Before Canonicalizer
+--// MOD2: @foo
+-+// MOD2-NEXT: @foo
+-   func.func @foo() {
+-     return
+-   }
+-diff -ruN --strip-trailing-cr a/mlir/test/Pass/dynamic-pipeline-nested.mlir b/mlir/test/Pass/dynamic-pipeline-nested.mlir
+---- a/mlir/test/Pass/dynamic-pipeline-nested.mlir
+-+++ b/mlir/test/Pass/dynamic-pipeline-nested.mlir
+-@@ -10,7 +10,7 @@
+- 
+- // CHECK: IR Dump Before
+- // CHECK-SAME: TestDynamicPipelinePass
+--// CHECK: module @inner_mod1
+-+// CHECK-NEXT: module @inner_mod1
+- module @inner_mod1 {
+- // We use the mlir-print-ir-after-all dumps to check the granularity of the
+- // scheduling: if we are nesting we expect to see to individual "Dump Before
+-@@ -18,11 +18,11 @@
+- // the CSE pass to run on the `inner_mod1` module directly.
+- 
+- // CHECK: Dump Before CSE
+--// NOTNESTED: @inner_mod1
+--// NESTED: @foo
+-+// NOTNESTED-NEXT: @inner_mod1
+-+// NESTED-NEXT: @foo
+-   module @foo {}
+- // Only in the nested case we have a second run of the pass here.
+- // NESTED: Dump Before CSE
+--// NESTED: @baz
+-+// NESTED-NEXT: @baz
+-   module @baz {}
+- }
+-diff -ruN --strip-trailing-cr a/mlir/test/Pass/ir-printing.mlir b/mlir/test/Pass/ir-printing.mlir
+---- a/mlir/test/Pass/ir-printing.mlir
+-+++ b/mlir/test/Pass/ir-printing.mlir
+-@@ -5,7 +5,6 @@
+- // RUN: mlir-opt %s -mlir-disable-threading=true -pass-pipeline='builtin.module(func.func(cse,canonicalize))' -mlir-print-ir-before=cse -mlir-print-ir-module-scope -o /dev/null 2>&1 | FileCheck -check-prefix=BEFORE_MODULE %s
+- // RUN: mlir-opt %s -mlir-disable-threading=true -pass-pipeline='builtin.module(func.func(cse,cse))' -mlir-print-ir-after-all -mlir-print-ir-after-change -o /dev/null 2>&1 | FileCheck -check-prefix=AFTER_ALL_CHANGE %s
+- // RUN: not mlir-opt %s -mlir-disable-threading=true -pass-pipeline='builtin.module(func.func(cse,test-pass-failure))' -mlir-print-ir-after-failure -o /dev/null 2>&1 | FileCheck -check-prefix=AFTER_FAILURE %s
+--// RUN: mlir-opt %s -mlir-disable-threading=true -pass-pipeline='builtin.module(func.func(canonicalize{max-iterations=5}))' -mlir-print-ir-before=canonicalize -o /dev/null 2>&1 | FileCheck -check-prefix=OPTIONS %s
+- 
+- func.func @foo() {
+-   %0 = arith.constant 0 : i32
+-@@ -16,55 +15,53 @@
+-   return
++diff -ruN --strip-trailing-cr a/llvm/lib/Object/Archive.cpp b/llvm/lib/Object/Archive.cpp
++--- a/llvm/lib/Object/Archive.cpp
+++++ b/llvm/lib/Object/Archive.cpp
++@@ -390,6 +390,10 @@
++                                                uint64_t Size, Error *Err)
++     : ArchiveMemberHeader(Parent, RawHeaderPtr, Size, Err) {
++   ErrorAsOutParameter ErrAsOutParam(Err);
+++  // If the base class constructor already detected an error
+++  // do not attempt to read header fields
+++  if (Err && *Err)
+++    return;
++   setMemberHeaderStrings(Err, Size);
+  }
+  
+--// BEFORE: // -----// IR Dump Before{{.*}}CSEPass: cse //----- //
+--// BEFORE: func @foo()
+--// BEFORE: // -----// IR Dump Before{{.*}}CSEPass: cse //----- //
+--// BEFORE: func @bar()
+--// BEFORE-NOT: // -----// IR Dump Before{{.*}}CanonicalizerPass: canonicalize //----- //
+-+// BEFORE: // -----// IR Dump Before{{.*}}CSEPass (cse) //----- //
+-+// BEFORE-NEXT: func @foo()
+-+// BEFORE: // -----// IR Dump Before{{.*}}CSEPass (cse) //----- //
+-+// BEFORE-NEXT: func @bar()
+-+// BEFORE-NOT: // -----// IR Dump Before{{.*}}CanonicalizerPass (canonicalize) //----- //
+- // BEFORE-NOT: // -----// IR Dump After
+- 
+--// BEFORE_ALL: // -----// IR Dump Before{{.*}}CSEPass: cse //----- //
+--// BEFORE_ALL: func @foo()
+--// BEFORE_ALL: // -----// IR Dump Before{{.*}}CanonicalizerPass: canonicalize{{.*}} //----- //
+--// BEFORE_ALL: func @foo()
+--// BEFORE_ALL: // -----// IR Dump Before{{.*}}CSEPass: cse //----- //
+--// BEFORE_ALL: func @bar()
+--// BEFORE_ALL: // -----// IR Dump Before{{.*}}CanonicalizerPass: canonicalize{{.*}} //----- //
+--// BEFORE_ALL: func @bar()
+-+// BEFORE_ALL: // -----// IR Dump Before{{.*}}CSEPass (cse) //----- //
+-+// BEFORE_ALL-NEXT: func @foo()
+-+// BEFORE_ALL: // -----// IR Dump Before{{.*}}CanonicalizerPass (canonicalize) //----- //
+-+// BEFORE_ALL-NEXT: func @foo()
+-+// BEFORE_ALL: // -----// IR Dump Before{{.*}}CSEPass (cse) //----- //
+-+// BEFORE_ALL-NEXT: func @bar()
+-+// BEFORE_ALL: // -----// IR Dump Before{{.*}}CanonicalizerPass (canonicalize) //----- //
+-+// BEFORE_ALL-NEXT: func @bar()
+- // BEFORE_ALL-NOT: // -----// IR Dump After
+- 
+- // AFTER-NOT: // -----// IR Dump Before
+--// AFTER: // -----// IR Dump After{{.*}}CSEPass: cse //----- //
+--// AFTER: func @foo()
+--// AFTER: // -----// IR Dump After{{.*}}CSEPass: cse //----- //
+--// AFTER: func @bar()
+--// AFTER-NOT: // -----// IR Dump After{{.*}}CanonicalizerPass: canonicalize{{.*}} //----- //
+-+// AFTER: // -----// IR Dump After{{.*}}CSEPass (cse) //----- //
+-+// AFTER-NEXT: func @foo()
+-+// AFTER: // -----// IR Dump After{{.*}}CSEPass (cse) //----- //
+-+// AFTER-NEXT: func @bar()
+-+// AFTER-NOT: // -----// IR Dump After{{.*}}CanonicalizerPass (canonicalize) //----- //
+- 
+- // AFTER_ALL-NOT: // -----// IR Dump Before
+--// AFTER_ALL: // -----// IR Dump After{{.*}}CSEPass: cse //----- //
+--// AFTER_ALL: func @foo()
+--// AFTER_ALL: // -----// IR Dump After{{.*}}CanonicalizerPass: canonicalize{{.*}} //----- //
+--// AFTER_ALL: func @foo()
+--// AFTER_ALL: // -----// IR Dump After{{.*}}CSEPass: cse //----- //
+--// AFTER_ALL: func @bar()
+--// AFTER_ALL: // -----// IR Dump After{{.*}}CanonicalizerPass: canonicalize{{.*}} //----- //
+--// AFTER_ALL: func @bar()
+-+// AFTER_ALL: // -----// IR Dump After{{.*}}CSEPass (cse) //----- //
+-+// AFTER_ALL-NEXT: func @foo()
+-+// AFTER_ALL: // -----// IR Dump After{{.*}}CanonicalizerPass (canonicalize) //----- //
+-+// AFTER_ALL-NEXT: func @foo()
+-+// AFTER_ALL: // -----// IR Dump After{{.*}}CSEPass (cse) //----- //
+-+// AFTER_ALL-NEXT: func @bar()
+-+// AFTER_ALL: // -----// IR Dump After{{.*}}CanonicalizerPass (canonicalize) //----- //
+-+// AFTER_ALL-NEXT: func @bar()
+- 
+--// BEFORE_MODULE: // -----// IR Dump Before{{.*}}CSEPass: cse ('func.func' operation: @foo) //----- //
+-+// BEFORE_MODULE: // -----// IR Dump Before{{.*}}CSEPass (cse) ('func.func' operation: @foo) //----- //
+- // BEFORE_MODULE: func @foo()
+- // BEFORE_MODULE: func @bar()
+--// BEFORE_MODULE: // -----// IR Dump Before{{.*}}CSEPass: cse ('func.func' operation: @bar) //----- //
+-+// BEFORE_MODULE: // -----// IR Dump Before{{.*}}CSEPass (cse) ('func.func' operation: @bar) //----- //
+- // BEFORE_MODULE: func @foo()
+- // BEFORE_MODULE: func @bar()
+- 
+--// AFTER_ALL_CHANGE: // -----// IR Dump After{{.*}}CSEPass: cse //----- //
+--// AFTER_ALL_CHANGE: func @foo()
+--// AFTER_ALL_CHANGE-NOT: // -----// IR Dump After{{.*}}CSEPass: cse //----- //
+-+// AFTER_ALL_CHANGE: // -----// IR Dump After{{.*}}CSEPass (cse) //----- //
+-+// AFTER_ALL_CHANGE-NEXT: func @foo()
+-+// AFTER_ALL_CHANGE-NOT: // -----// IR Dump After{{.*}}CSEPass (cse) //----- //
+- // We expect that only 'foo' changed during CSE, and the second run of CSE did
+- // nothing.
+- 
+- // AFTER_FAILURE-NOT: // -----// IR Dump After{{.*}}CSE
+--// AFTER_FAILURE: // -----// IR Dump After{{.*}}TestFailurePass Failed: test-pass-failure{{.*}} //----- //
+-+// AFTER_FAILURE: // -----// IR Dump After{{.*}}TestFailurePass Failed (test-pass-failure) //----- //
+- // AFTER_FAILURE: func @foo()
+--
+--// OPTIONS: // -----// IR Dump Before{{.*}}CanonicalizerPass: canonicalize{cse-between-iterations=false{{[[:space:]]*}}max-iterations=5 max-num-rewrites=-1 region-simplify=normal test-convergence=false top-down=true} //----- //
+-diff -ruN --strip-trailing-cr a/mlir/test/Pass/run-reproducer.mlir b/mlir/test/Pass/run-reproducer.mlir
+---- a/mlir/test/Pass/run-reproducer.mlir
+-+++ b/mlir/test/Pass/run-reproducer.mlir
+-@@ -26,9 +26,9 @@
+-   }
+- #-}
+- 
+--// BEFORE: // -----// IR Dump Before{{.*}}CSEPass: cse //----- //
+--// BEFORE: func @foo()
+--// BEFORE: // -----// IR Dump Before{{.*}}CSEPass: cse //----- //
+--// BEFORE: func @bar()
+--// BEFORE-NOT: // -----// IR Dump Before{{.*}}CanonicalizerPass: canonicalize //----- //
+-+// BEFORE: // -----// IR Dump Before{{.*}}CSEPass (cse) //----- //
+-+// BEFORE-NEXT: func @foo()
+-+// BEFORE: // -----// IR Dump Before{{.*}}CSEPass (cse) //----- //
+-+// BEFORE-NEXT: func @bar()
+-+// BEFORE-NOT: // -----// IR Dump Before{{.*}}CanonicalizerPass (canonicalize) //----- //
+- // BEFORE-NOT: // -----// IR Dump After
+-diff -ruN --strip-trailing-cr a/mlir/test/python/pass_manager.py b/mlir/test/python/pass_manager.py
+---- a/mlir/test/python/pass_manager.py
+-+++ b/mlir/test/python/pass_manager.py
+-@@ -275,7 +275,7 @@
+-         pm = PassManager.parse("builtin.module(canonicalize)")
+-         ctx.enable_multithreading(False)
+-         pm.enable_ir_printing()
+--        # CHECK: // -----// IR Dump After CanonicalizerPass: canonicalize{{.*}} //----- //
+-+        # CHECK: // -----// IR Dump After CanonicalizerPass (canonicalize) //----- //
+-         # CHECK: module {
+-         # CHECK:   func.func @main() {
+-         # CHECK:     return
+-@@ -301,14 +301,14 @@
+-         pm = PassManager.parse("builtin.module(canonicalize)")
+-         ctx.enable_multithreading(False)
+-         pm.enable_ir_printing(print_before_all=True, print_after_all=True)
+--        # CHECK: // -----// IR Dump Before CanonicalizerPass: canonicalize{{.*}} //----- //
+-+        # CHECK: // -----// IR Dump Before CanonicalizerPass (canonicalize) //----- //
+-         # CHECK: module {
+-         # CHECK:   func.func @main() {
+-         # CHECK:     %[[C10:.*]] = arith.constant 10 : i64
+-         # CHECK:     return
+-         # CHECK:   }
+-         # CHECK: }
+--        # CHECK: // -----// IR Dump After CanonicalizerPass: canonicalize{{.*}} //----- //
+-+        # CHECK: // -----// IR Dump After CanonicalizerPass (canonicalize) //----- //
+-         # CHECK: module {
+-         # CHECK:   func.func @main() {
+-         # CHECK:     return
 diff --git a/third_party/llvm/workspace.bzl b/third_party/llvm/workspace.bzl
-index bf16ff8f..de600e09 100644
+index e7990e33..bccb4526 100644
 --- a/third_party/llvm/workspace.bzl
 +++ b/third_party/llvm/workspace.bzl
 @@ -4,8 +4,8 @@ load("//third_party:repo.bzl", "tf_http_archive")
  
  def repo(name):
      """Imports LLVM."""
--    LLVM_COMMIT = "0e6d57648584c3895abd3021fb8fa2a767146d5a"
--    LLVM_SHA256 = "bbd2acb1760bb6a3566a0ffa272f0828c4f2d8233be1759741023abb73910c44"
-+    LLVM_COMMIT = "87d42c13cd6b119240781f31e5869981d500a186"
-+    LLVM_SHA256 = "66b7f645a9a67d6692c5bea033a536972fcd2e80aa31408d579aae5811521869"
+-    LLVM_COMMIT = "eeca78019189a5559a694bb4774fec3e6ae07096"
+-    LLVM_SHA256 = "69d729afd44cfa74e0477063974919023d26e5e5d8218fb4da5db767c41a6858"
++    LLVM_COMMIT = "9a4faee1068c09efbf837cfb7b0f5693b24635f4"
++    LLVM_SHA256 = "26ac22d8c5fbf0a9020a86417254a3705c4309d55a3dbb40c160228ecde3fa6e"
  
      tf_http_archive(
          name = name,
-diff --git a/third_party/stablehlo/temporary.patch b/third_party/stablehlo/temporary.patch
-index 6c4788de..98e44999 100644
---- a/third_party/stablehlo/temporary.patch
-+++ b/third_party/stablehlo/temporary.patch
-@@ -565,112 +565,6 @@ diff --ruN a/stablehlo/stablehlo/reference/Tensor.cpp b/stablehlo/stablehlo/refe
-              return std::complex<double>(value.real().convertToDouble(),
-                                          value.imag().convertToDouble());
-            });
--diff --ruN a/stablehlo/stablehlo/tests/transforms/mesh_axes_replica_group_compatibility.mlir b/stablehlo/stablehlo/tests/transforms/mesh_axes_replica_group_compatibility.mlir
----- stablehlo/stablehlo/tests/transforms/mesh_axes_replica_group_compatibility.mlir
--+++ stablehlo/stablehlo/tests/transforms/mesh_axes_replica_group_compatibility.mlir
--@@ -1,4 +1,4 @@
---// RUN: stablehlo-opt %s -stablehlo-compatibility-expander="target=1.14.0" | FileCheck %s
--+// RUN: stablehlo-opt %s -stablehlo-compatibility-expander="target=1.14.0" -allow-unregistered-dialect | FileCheck %s
-- 
-- module {
-- 
--@@ -40,4 +40,48 @@
-- 
--     return %0 : tensor<4xf32>
--   }
--+  "sdy.mesh"() {sym_name = "sdy_mesh", stablehlo.mesh = {axes = [{name = "x", size = 2 : i64}, {name = "y", size = 2 : i64}]}} : () -> ()
--+
--+  // CHECK-LABEL: @all_reduce_sdy_mesh
--+  func.func @all_reduce_sdy_mesh(%arg0: tensor<4xf32>) -> tensor<4xf32> {
--+    // CHECK: replica_groups = dense<{{\[\[}}0, 2], [1, 3]]> : tensor<2x2xi64>
--+    %0 = "stablehlo.all_reduce"(%arg0) ({
--+    ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
--+      %1 = "stablehlo.add"(%arg1, %arg2) : (tensor<f32>, tensor<f32>) -> tensor<f32>
--+      "stablehlo.return"(%1) : (tensor<f32>) -> ()
--+    }) {
--+      replica_groups = #stablehlo.replica_group_mesh_axes<mesh = @sdy_mesh, axes = [#stablehlo.axis_ref<name = "x">]>
--+    } : (tensor<4xf32>) -> tensor<4xf32>
--+    return %0 : tensor<4xf32>
--+  }
--+
--+  "sdy.mesh"() {sym_name = "sdy_mesh_dev", stablehlo.mesh = {axes = [{name = "x", size = 2 : i64}, {name = "y", size = 2 : i64}], device_ids = dense<[0, 2, 1, 3]> : tensor<4xi64>}} : () -> ()
--+
--+  // CHECK-LABEL: @all_reduce_sdy_mesh_dev
--+  func.func @all_reduce_sdy_mesh_dev(%arg0: tensor<4xf32>) -> tensor<4xf32> {
--+    // CHECK: replica_groups = dense<{{\[\[}}0, 1], [2, 3]]> : tensor<2x2xi64>
--+    %0 = "stablehlo.all_reduce"(%arg0) ({
--+    ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
--+      %1 = "stablehlo.add"(%arg1, %arg2) : (tensor<f32>, tensor<f32>) -> tensor<f32>
--+      "stablehlo.return"(%1) : (tensor<f32>) -> ()
--+    }) {
--+      replica_groups = #stablehlo.replica_group_mesh_axes<mesh = @sdy_mesh_dev, axes = [#stablehlo.axis_ref<name = "x">]>
--+    } : (tensor<4xf32>) -> tensor<4xf32>
--+    return %0 : tensor<4xf32>
--+  }
--+
--+  "sdy.mesh"() {sym_name = "sdy_mesh_max", stablehlo.mesh = {axes = [], device_ids = dense<0> : tensor<1xi64>}} : () -> ()
--+
--+  // CHECK-LABEL: @all_reduce_sdy_mesh_max
--+  func.func @all_reduce_sdy_mesh_max(%arg0: tensor<4xf32>) -> tensor<4xf32> {
--+    // CHECK: replica_groups = dense<0> : tensor<1x1xi64>
--+    %0 = "stablehlo.all_reduce"(%arg0) ({
--+    ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
--+      %1 = "stablehlo.add"(%arg1, %arg2) : (tensor<f32>, tensor<f32>) -> tensor<f32>
--+      "stablehlo.return"(%1) : (tensor<f32>) -> ()
--+    }) {
--+      replica_groups = #stablehlo.replica_group_mesh_axes<mesh = @sdy_mesh_max, axes = []>
--+    } : (tensor<4xf32>) -> tensor<4xf32>
--+    return %0 : tensor<4xf32>
--+  }
-- }
--diff --ruN a/stablehlo/stablehlo/transforms/StablehloCompatibilityExpander.cpp b/stablehlo/stablehlo/transforms/StablehloCompatibilityExpander.cpp
----- stablehlo/stablehlo/transforms/StablehloCompatibilityExpander.cpp
--+++ stablehlo/stablehlo/transforms/StablehloCompatibilityExpander.cpp
--@@ -311,6 +311,31 @@
--   }
-- };
-- 
--+stablehlo::MeshAttr resolveMeshAttrFromDict(DictionaryAttr dictAttr) {
--+  MLIRContext* ctx = dictAttr.getContext();
--+
--+  // Extract axes
--+  auto axesAttr = dictAttr.getAs<ArrayAttr>("axes");
--+  if (!axesAttr) return {};
--+
--+  SmallVector<stablehlo::MeshAxisAttr> axes;
--+  for (Attribute attr : axesAttr) {
--+    auto axisDict = dyn_cast<DictionaryAttr>(attr);
--+    if (!axisDict) return {};
--+    auto nameAttr = axisDict.getAs<StringAttr>("name");
--+    auto sizeAttr = axisDict.getAs<IntegerAttr>("size");
--+    if (!nameAttr || !sizeAttr) return {};
--+    axes.push_back(stablehlo::MeshAxisAttr::get(ctx, nameAttr.getValue(),
--+                                                sizeAttr.getInt()));
--+  }
--+
--+  // Extract device_ids
--+  DenseIntElementsAttr deviceIds =
--+      dictAttr.getAs<DenseIntElementsAttr>("device_ids");
--+
--+  return stablehlo::MeshAttr::get(ctx, axes, deviceIds);
--+}
--+
-- // ReplicaGroupMeshAxesExpander handles the conversion of
-- // #stablehlo.replica_group_mesh_axes to a dense I64ElementsAttr for target
-- // versions that do not support it.
--@@ -341,6 +366,12 @@
--             symbolOp->getAttrOfType<stablehlo::MeshAttr>("stablehlo.mesh");
--       }
--       if (!meshAttr) {
--+        if (auto dictAttr =
--+                symbolOp->getAttrOfType<DictionaryAttr>("stablehlo.mesh")) {
--+          meshAttr = resolveMeshAttrFromDict(dictAttr);
--+        }
--+      }
--+      if (!meshAttr) {
--         return op->emitError("Failed to find mesh attribute on symbol");
--       }
--     }
- diff --ruN a/stablehlo/stablehlo/transforms/StablehloLegalizeDeprecatedOps.cpp b/stablehlo/stablehlo/transforms/StablehloLegalizeDeprecatedOps.cpp
- --- stablehlo/stablehlo/transforms/StablehloLegalizeDeprecatedOps.cpp
- +++ stablehlo/stablehlo/transforms/StablehloLegalizeDeprecatedOps.cpp

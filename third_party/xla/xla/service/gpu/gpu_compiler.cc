@@ -31,6 +31,7 @@ limitations under the License.
 #include "absl/base/nullability.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -104,6 +105,7 @@ limitations under the License.
 #include "xla/backends/gpu/transforms/dot_operand_converter.h"
 #include "xla/backends/gpu/transforms/dot_strength_reduction.h"
 #include "xla/backends/gpu/transforms/double_buffer_loop_unrolling.h"
+#include "xla/backends/gpu/transforms/dynamic_slice_annotator.h"
 #include "xla/backends/gpu/transforms/dynamic_slice_fusion_rewriter.h"
 #include "xla/backends/gpu/transforms/estimate_cub_scan_scratch_size.h"
 #include "xla/backends/gpu/transforms/estimate_cub_sort_scratch_size.h"
@@ -148,6 +150,7 @@ limitations under the License.
 #include "xla/core/host_offloading/hlo_host_device_type_call_wrapper.h"
 #include "xla/core/host_offloading/host_compute_asyncifier.h"
 #include "xla/hlo/analysis/alias_info.h"
+#include "xla/hlo/analysis/hlo_alias_analysis.h"
 #include "xla/hlo/analysis/symbolic_expr.h"
 #include "xla/hlo/builder/xla_computation.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
@@ -288,6 +291,7 @@ limitations under the License.
 #include "xla/service/gpu/thunk_emitter.h"
 #include "xla/service/gpu_topology.h"
 #include "xla/service/hlo.pb.h"
+#include "xla/service/hlo_buffer.h"
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/service/hlo_cse.h"
 #include "xla/service/hlo_module_config.h"
@@ -319,6 +323,7 @@ limitations under the License.
 #include "xla/status_macros.h"
 #include "xla/stream_executor/abi/executable_abi_version.h"
 #include "xla/stream_executor/cuda/cuda_compute_capability.h"
+#include "xla/stream_executor/device_address_allocator.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/device_description.pb.h"
 #include "xla/stream_executor/dnn.h"
@@ -345,7 +350,6 @@ limitations under the License.
 #include "tsl/platform/numbers.h"
 #include "tsl/platform/path.h"
 #include "tsl/platform/protobuf.h"  // IWYU pragma: keep
-#include "tsl/platform/stacktrace.h"
 #include "tsl/profiler/lib/scoped_annotation.h"
 #include "tsl/profiler/lib/traceme.h"
 
@@ -1106,7 +1110,7 @@ absl::Status RunCollectiveOptimizationPasses(
           }
 
           std::vector<HloInstruction*> to_check = {instr->mutable_operand(0)};
-          std::set<HloInstruction*> visited;
+          absl::flat_hash_set<HloInstruction*> visited;
 
           while (!to_check.empty()) {
             HloInstruction* current = to_check.back();
@@ -1469,8 +1473,14 @@ absl::Status RunDynamicSliceFusionPasses(HloModule* hlo_module,
                                          se::Platform::Id platform_id,
                                          CompilationStats* compilation_stats) {
   const DebugOptions& opts = hlo_module->config().debug_options();
+
+  // Always annotate dynamic slice operation with statically know offsets. We
+  // rely on these annotations when running fusion dispatch pipeline to optimize
+  // DS/DUS fusions that can be replaced by a more efficient copy operation.
+  HloPassPipeline pipeline("dynamic-slice", compilation_stats);
+  pipeline.AddPass<DynamicSliceAnnotator>();
+
   if (opts.xla_gpu_enable_dynamic_slice_fusion()) {
-    HloPassPipeline pipeline("dynamic-slice", compilation_stats);
     pipeline.AddPass<GpuReduceScatterCombiner>(
         kDefaultReduceScatterCombineThreshold,
         opts.xla_gpu_reduce_scatter_combine_threshold_bytes(),
@@ -1488,10 +1498,11 @@ absl::Status RunDynamicSliceFusionPasses(HloModule* hlo_module,
           });
       return hero_op.has_value();
     });
-    RETURN_IF_ERROR(
-        pipeline.Run(hlo_module, {HloInstruction::kMainExecutionThread})
-            .status());
   }
+
+  RETURN_IF_ERROR(
+      pipeline.Run(hlo_module, {HloInstruction::kMainExecutionThread})
+          .status());
 
   return absl::OkStatus();
 }
@@ -2053,7 +2064,6 @@ absl::Status GpuCompiler::OptimizeHloPostLayoutAssignment(
   // normalized again.
   add_float_normalization(pipeline);
 
-
   // Clean up new_tuple described above.
   pipeline.AddPass<TupleSimplifier>();
 
@@ -2221,11 +2231,6 @@ bool ShouldAddCopyForCollectiveMemorySpace(const HloValue* value,
                                            const GpuTopology& gpu_topology) {
   const HloInstruction* inst = value->defining_instruction();
   const HloModule* module = inst->GetModule();
-  const bool is_nccl_buffers_used =
-      (module->config().debug_options().xla_gpu_enable_nccl_user_buffers() ||
-       module->config()
-           .debug_options()
-           .xla_gpu_experimental_enable_nccl_symmetric_buffers());
   // Add copy if a potential collective-memory-spaced op directly consumes from
   // module input or a constant as they are allocated by bfc ahead of time and
   // the alignment might not match collective memory space's requirement.
@@ -2233,10 +2238,10 @@ bool ShouldAddCopyForCollectiveMemorySpace(const HloValue* value,
           module->entry_computation()->parameter_instructions(), inst) ||
       (inst->opcode() == HloOpcode::kConstant)) {
     for (auto& use : value->GetUses()) {
-      if ((is_nccl_buffers_used && IsCollective(use.instruction)) ||
-          RequiresCollectiveSymmetricMemorySpace(use.instruction) ||
+      if (RequiresCollectiveSymmetricMemorySpace(use.instruction) ||
           IsCollectiveMosaicGpuInstruction(*use.instruction) ||
-          (gpu_topology.number_of_hosts() > 1 &&
+          (gpu_topology.num_partitions() >
+               gpu_topology.num_devices_per_host() &&
            IsMosaicWithCollectiveMetadata(*use.instruction)) ||
           UsesCollectiveMemorySpaceFrontendAttr(use)) {
         return true;
@@ -2244,6 +2249,156 @@ bool ShouldAddCopyForCollectiveMemorySpace(const HloValue* value,
     }
   }
   return false;
+}
+
+bool RequiresCollectiveInput(const HloUse& use, const DebugOptions& opts) {
+  const bool is_nccl_buffers_used =
+      opts.xla_gpu_enable_nccl_user_buffers() ||
+      opts.xla_gpu_experimental_enable_nccl_symmetric_buffers();
+
+  HloInstruction* user = use.instruction;
+
+  // Handle standard non-fusion/fusion collectives under NCCL user buffers
+  if (is_nccl_buffers_used && IsCollective(user)) {
+    return true;
+  }
+  // Handle one-shot zero-copy RaggedAllToAll
+  if (IsOneShotZeroCopyRaggedAllToAllEnabled(opts)) {
+    // User is RA2A or AsyncStart(RA2A). Used by operand 1 (output).
+    if ((IsRaggedAllToAllOrAsyncStartRaggedAllToAll(user)) &&
+        use.operand_number == 1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool RequiresCollectiveOutput(const HloInstruction* def,
+                              const DebugOptions& opts) {
+  const bool is_nccl_buffers_used =
+      opts.xla_gpu_enable_nccl_user_buffers() ||
+      opts.xla_gpu_experimental_enable_nccl_symmetric_buffers();
+
+  // Handle standard non-fusion/fusion collectives under NCCL user buffers
+  if (is_nccl_buffers_used && IsCollective(def)) {
+    return true;
+  }
+  // Handle one-shot zero-copy RaggedAllToAll
+  if (IsOneShotZeroCopyRaggedAllToAllEnabled(opts)) {
+    // Defining Instruction is RA2A or AsyncDone(RA2A)
+    if (IsRaggedAllToAllOrAsyncDoneRaggedAllToAll(def)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// TODO: b/482045400: Migrate remaining cases from
+// ShouldAddCopyForCollectiveMemorySpace
+// (RequiresCollectiveSymmetricMemorySpace,
+// IsCollectiveMosaicGpuInstruction, UsesCollectiveMemorySpaceFrontendAttr)
+// to this function from ShouldAddCopyForCollectiveMemorySpace
+void GpuCollectiveBufferAnalysis(
+    HloModule* module, const HloAliasAnalysis& alias_analysis,
+    std::function<void(HloInstruction*, const ShapeIndex&)> add_index_to_copy,
+    const GpuTopology& gpu_topology) {
+  const auto& opts = module->config().debug_options();
+  VLOG(2) << "Running unified GPU Custom Buffer Analysis for collective memory "
+             "spaces";
+
+  for (const HloBuffer& buffer : alias_analysis.buffers()) {
+    // Entry inputs or constants contained in this buffer
+    absl::InlinedVector<const HloValue*, 2> entry_input_values;
+    // Values in this buffer that flow out of the module
+    absl::InlinedVector<const HloValue*, 2> live_out_values;
+    bool used_by_collective = false;
+    bool defined_by_collective = false;
+    // Analyze all values sharing this Hlo Buffer
+    for (const HloValue* value : buffer.values()) {
+      HloInstruction* def = value->defining_instruction();
+
+      // Track if this buffer hosts an Entry Parameter or a Constant
+      if ((def->opcode() == HloOpcode::kParameter &&
+           def->parent()->IsEntryComputation()) ||
+          def->opcode() == HloOpcode::kConstant) {
+        entry_input_values.push_back(value);
+      }
+
+      // Check if this buffer value is used by an op which requires collective
+      // input memory space.
+      for (const HloUse& use : value->GetUses()) {
+        if (RequiresCollectiveInput(use, opts)) {
+          used_by_collective = true;
+          break;
+        }
+      }
+
+      // Track if this buffer flows directly out of the module
+      if (value->live_out_of_module()) {
+        live_out_values.push_back(value);
+      }
+
+      if (RequiresCollectiveOutput(def, opts)) {
+        defined_by_collective = true;
+      }
+    }
+
+    if (VLOG_IS_ON(5)) {
+      std::string buf = absl::StrCat("HloBuffer: ", buffer.ToString(), "\n");
+      for (const HloValue* v : entry_input_values) {
+        absl::StrAppend(&buf, "  entry_input_value: ", v->ToShortString(),
+                        "\n");
+      }
+      for (const HloValue* v : live_out_values) {
+        absl::StrAppend(&buf, "  live_out_value: ", v->ToShortString(), "\n");
+      }
+      absl::StrAppend(&buf, "  used_by_collective: ", used_by_collective, "\n");
+      absl::StrAppend(&buf, "  defined_by_collective: ", defined_by_collective);
+      VLOG(5) << buf;
+    }
+
+    // Special Copy Insertion Case A: Entry input
+    if (used_by_collective && !entry_input_values.empty()) {
+      for (const HloValue* input_value : entry_input_values) {
+        VLOG(2) << "Special Copy Insertion Case A: Entry input "
+                << input_value->ToShortString()
+                << " shares a buffer with an S1 operand. Inserting copy.";
+        add_index_to_copy(input_value->defining_instruction(),
+                          input_value->defining_index());
+      }
+    }
+
+    // Special Copy Insertion Case B: Entry output
+    if (defined_by_collective && !live_out_values.empty()) {
+      for (const HloValue* live_out_value : live_out_values) {
+        VLOG(2) << "Special Copy Insertion Case B: S1 collective output flows "
+                   "directly to entry output. Searching for entry-level ROOT "
+                   "position for "
+                << live_out_value->ToShortString();
+
+        bool marked_for_copy = false;
+        for (const HloPosition& pos : live_out_value->positions()) {
+          if (pos.instruction->parent()->IsEntryComputation() &&
+              pos.instruction->IsRoot()) {
+            VLOG(2)
+                << "Marking ENTRY ROOT instruction for collective output copy: "
+                << pos.instruction->name() << " at index "
+                << pos.index.ToString();
+            add_index_to_copy(pos.instruction, pos.index);
+            marked_for_copy = true;
+          }
+        }
+
+        if (!marked_for_copy) {
+          LOG(WARNING)
+              << "Special Copy Insertion Case B: Could not find "
+                 "entry-level ROOT position for collective live-out value "
+              << live_out_value->ToShortString() << " in buffer "
+              << buffer.id();
+        }
+      }
+    }
+  }
 }
 
 absl::Status RunPostSchedulingCopyInsertion(HloModule* module,
@@ -2260,6 +2415,7 @@ absl::Status RunPostSchedulingCopyInsertion(HloModule* module,
           : 0;
   CopyInsertion copy_insertion(alias_info, kUseRegionBasedLiveRangeAnalysis);
   RETURN_IF_ERROR(copy_insertion.RemoveUnnecessaryCopies(module));
+  RETURN_IF_ERROR(HloDCE().Run(module).status());
 
   // Stash away the schedule during copy insertion, to avoid validation failures
   // while the module is in flux.
@@ -2270,9 +2426,18 @@ absl::Status RunPostSchedulingCopyInsertion(HloModule* module,
   // whether it is legal to remove a copy. However, copies in the graph may be
   // necessary for other reason such as preventing a constant from being live
   // out of the graph. So run AddSpecialCaseCopies to re-insert these copies.
+  // Use GpuCollectiveBufferAnalysis to insert required copies for collective
+  // memory space buffers.
   RETURN_IF_ERROR(copy_insertion.CopyInsertion::AddSpecialCaseCopies(
-      module, /*execution_threads=*/{}, [&gpu_topology](const HloValue* value) {
+      module, /*execution_threads=*/{},
+      [&gpu_topology](const HloValue* value) {
         return ShouldAddCopyForCollectiveMemorySpace(value, gpu_topology);
+      },
+      [&gpu_topology](HloModule* mod, const HloAliasAnalysis& alias_analysis,
+                      std::function<void(HloInstruction*, const ShapeIndex&)>
+                          add_index_to_copy) {
+        GpuCollectiveBufferAnalysis(mod, alias_analysis, add_index_to_copy,
+                                    gpu_topology);
       }));
 
   RETURN_IF_ERROR(HloDCE().Run(module).status());
