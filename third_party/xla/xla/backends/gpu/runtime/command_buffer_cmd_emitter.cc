@@ -103,8 +103,8 @@ static absl::StatusOr<std::unique_ptr<Command>> Convert(
       std::move(body_cmds), thunk.trip_count(), options.enable_loop_unroll);
 }
 
-static absl::StatusOr<std::unique_ptr<Command>> Convert(
-    const ConditionalThunk& thunk, const ConvertToCommandsOptions& options) {
+static absl::Status SetOrUpdateCommandBufferBranchExecutors(
+    ConditionalThunk& thunk, const ConvertToCommandsOptions& options) {
   std::vector<CommandExecutor> branch_cmds;
   branch_cmds.reserve(thunk.branch_executors().size());
   if (thunk.branch_index_is_bool()) {
@@ -118,43 +118,13 @@ static absl::StatusOr<std::unique_ptr<Command>> Convert(
         branch_cmds.emplace_back(),
         ConvertToCommands(thunk.branch_executors()[0].thunks(), options));
   } else {
-    for (auto& branch_thunk : thunk.branch_executors()) {
+    for (const ThunkExecutor& branch_thunk : thunk.branch_executors()) {
       ASSIGN_OR_RETURN(CommandExecutor cmds,
                        ConvertToCommands(branch_thunk.thunks(), options));
       branch_cmds.emplace_back(std::move(cmds));
     }
   }
-  return std::make_unique<CaseCmd>(thunk.branch_index_buffer(),
-                                   std::move(branch_cmds));
-}
-
-static absl::StatusOr<std::unique_ptr<Command>> Convert(
-    const AllToAllThunk& thunk) {
-  return std::make_unique<AllToAllCmd>(
-      thunk.config(), thunk.has_split_dimension(), thunk.buffers());
-}
-
-static absl::StatusOr<std::unique_ptr<Command>> Convert(
-    const AllGatherThunk& thunk) {
-  return std::make_unique<AllGatherCmd>(thunk.config(), thunk.buffers());
-}
-
-static absl::StatusOr<std::unique_ptr<Command>> Convert(
-    const CollectivePermuteThunk& thunk) {
-  return std::make_unique<CollectivePermuteCmd>(
-      thunk.config(), thunk.p2p_config(), thunk.buffers());
-}
-
-static absl::StatusOr<std::unique_ptr<Command>> Convert(
-    const RecvThunk& thunk) {
-  return std::make_unique<RecvCmd>(thunk.config(), thunk.p2p_config(),
-                                   thunk.buffer());
-}
-
-static absl::StatusOr<std::unique_ptr<Command>> Convert(
-    const SendThunk& thunk) {
-  return std::make_unique<SendCmd>(thunk.config(), thunk.p2p_config(),
-                                   thunk.buffer());
+  return thunk.SetOrUpdateCommandBufferBranchExecutors(std::move(branch_cmds));
 }
 
 //===----------------------------------------------------------------------===//
@@ -193,8 +163,13 @@ static absl::Status AppendCommands(ConversionContext& ctx,
   };
 
   switch (thunk.kind()) {
-    case Thunk::Kind::kConditional:
-      return append(Convert<ConditionalThunk>(thunk, options));
+    case Thunk::Kind::kConditional: {
+      auto& conditional_thunk = static_cast<ConditionalThunk&>(thunk);
+      TF_RETURN_IF_ERROR(
+          SetOrUpdateCommandBufferBranchExecutors(conditional_thunk, options));
+      cmd_sequence.Append(&conditional_thunk);
+      return absl::OkStatus();
+    }
     case Thunk::Kind::kCopy:
       cmd_sequence.Append(static_cast<DeviceToDeviceCopyThunk*>(&thunk));
       return absl::OkStatus();
@@ -236,8 +211,11 @@ static absl::Status AppendCommands(ConversionContext& ctx,
     case Thunk::Kind::kMemzero:
       cmd_sequence.Append(static_cast<MemzeroThunk*>(&thunk));
       return absl::OkStatus();
+    // AllGatherThunk implements Command directly; append as borrowed pointer —
+    // the thunk outlives the command sequence.
     case Thunk::Kind::kAllGather:
-      return append(Convert<AllGatherThunk>(thunk));
+      cmd_sequence.Append(static_cast<AllGatherThunk*>(&thunk));
+      return absl::OkStatus();
     // AllReduceThunk implements Command directly; append as borrowed pointer —
     // the thunk outlives the command sequence.
     case Thunk::Kind::kAllReduce:
@@ -248,23 +226,30 @@ static absl::Status AppendCommands(ConversionContext& ctx,
     case Thunk::Kind::kReduceScatter:
       cmd_sequence.Append(static_cast<ReduceScatterThunk*>(&thunk));
       return absl::OkStatus();
+    // AllToAllThunk implements Command directly; append as borrowed pointer.
     case Thunk::Kind::kAllToAll:
-      return append(Convert<AllToAllThunk>(thunk));
-    // CollectiveBroadcastThunk implements Command directly; append as borrowed
-    // pointer — the thunk outlives the command sequence.
+      cmd_sequence.Append(static_cast<AllToAllThunk*>(&thunk));
+      return absl::OkStatus();
     case Thunk::Kind::kCollectiveBroadcast:
       cmd_sequence.Append(static_cast<CollectiveBroadcastThunk*>(&thunk));
       return absl::OkStatus();
+    // CollectivePermuteThunk implements Command directly; append as borrowed
+    // pointer — the thunk outlives the command sequence.
     case Thunk::Kind::kCollectivePermute:
-      return append(Convert<CollectivePermuteThunk>(thunk));
+      cmd_sequence.Append(static_cast<CollectivePermuteThunk*>(&thunk));
+      return absl::OkStatus();
     // RaggedAllToAllThunk implements Command directly; append borrowed pointer.
     case Thunk::Kind::kRaggedAllToAll:
       cmd_sequence.Append(static_cast<RaggedAllToAllThunk*>(&thunk));
       return absl::OkStatus();
+    // RecvThunk implements Command directly; append borrowed pointer.
     case Thunk::Kind::kRecv:
-      return append(Convert<RecvThunk>(thunk));
+      cmd_sequence.Append(static_cast<RecvThunk*>(&thunk));
+      return absl::OkStatus();
+    // SendThunk implements Command directly; append borrowed pointer.
     case Thunk::Kind::kSend:
-      return append(Convert<SendThunk>(thunk));
+      cmd_sequence.Append(static_cast<SendThunk*>(&thunk));
+      return absl::OkStatus();
     // These thunks implement Command directly; append borrowed pointers.
     // Note: kCopy also borrows DeviceToDeviceCopyThunk (see case above).
     case Thunk::Kind::kMemset32BitValue:
@@ -526,7 +511,7 @@ absl::Status AppendCommandsInConcurrentRegions(
     ConcurrentRegionScheduler& scheduler =
         concurrent_region_schedules.emplace_back(absl::MakeSpan(thunks));
     for (Thunk* thunk : scheduler.scheduled_thunks()) {
-      TF_RETURN_IF_ERROR(AppendCommands(ctx, cmd_sequence, *thunk, options));
+      RETURN_IF_ERROR(AppendCommands(ctx, cmd_sequence, *thunk, options));
       int64_t index = cmd_sequence.size() - 1;
       thunk_to_index[thunk] = index;
     }

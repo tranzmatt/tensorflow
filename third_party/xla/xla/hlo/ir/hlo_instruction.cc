@@ -65,6 +65,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_original_value.h"
 #include "xla/hlo/ir/hlo_original_value_util.h"
+#include "xla/hlo/ir/hlo_payload_deduplicator.h"
 #include "xla/hlo/ir/hlo_print_options.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/hlo/ir/hlo_sharding_metadata.h"
@@ -291,23 +292,6 @@ HloInstruction* HloInstruction::AddInstruction(
   }
   return derived;
 }
-
-namespace {
-absl::StatusOr<std::string> GetStringFromPayload(
-    const Payload& payload,
-    const tsl::protobuf::RepeatedPtrField<std::string>* payloads) {
-  if (payload.has_id()) {
-    if (payloads != nullptr && payload.id() >= 0 &&
-        payload.id() < payloads->size()) {
-      return payloads->at(payload.id());
-    }
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "Payload requested ID %d but payloads array has size %d", payload.id(),
-        payloads ? payloads->size() : 0));
-  }
-  return payload.value();
-}
-}  // namespace
 
 /* static */
 absl::StatusOr<std::unique_ptr<HloInstruction>> HloInstruction::CreateFromProto(
@@ -4455,6 +4439,19 @@ void HloInstruction::PrintExtraAttributes(
               [](Printer* printer) { printer->Append("is_composite=true"); });
         }
         break;
+      case HloOpcode::kCustomCall:
+        if (!called_computations().empty()) {
+          printer.Next([this, &new_options](Printer* printer) {
+            printer->Append("called_computations={\n");
+            AppendJoin(
+                printer, called_computations(), ",\n",
+                [&](Printer* printer, const HloComputation* computation) {
+                  computation->Print(printer, new_options);
+                });
+            printer->Append("\n}");
+          });
+        }
+        break;
       default:
         if (!called_computations().empty()) {
           printer.Next([this, &new_options](Printer* printer) {
@@ -4592,6 +4589,8 @@ void HloInstruction::ToProto(HloInstructionProto* proto) const {
 
   *proto->mutable_metadata() = metadata();
   proto->set_backend_config(backend_config_->GetRawString());
+  proto->clear_backend_config_payload();
+
   if (opcode() != HloOpcode::kFusion) {
     for (const HloComputation* computation : called_computations()) {
       proto->add_called_computation_ids(computation->unique_id());
@@ -4613,6 +4612,16 @@ void HloInstruction::ToProto(HloInstructionProto* proto) const {
 
   if (has_result_accuracy()) {
     *proto->mutable_result_accuracy() = result_accuracy();
+  }
+}
+
+void HloInstruction::ToProto(HloInstructionProto* proto,
+                             HloPayloadDeduplicator* deduplicator) const {
+  ToProto(proto);
+  if (deduplicator && !backend_config_->empty()) {
+    proto->mutable_backend_config_payload()->set_id(
+        deduplicator->Deduplicate(backend_config_.get()));
+    proto->clear_backend_config();
   }
 }
 
@@ -5885,17 +5894,17 @@ HloInstruction* HloInstruction::AddFusionOperand(HloInstruction* new_operand) {
 
 // Delegates to HloFusionInstruction::MergeFusionInstruction.
 void HloInstruction::MergeFusionInstruction(
-    HloInstruction* instruction_to_merge) {
+    HloInstruction* instruction_to_merge, bool remove_computation) {
   return Cast<HloFusionInstruction>(this)->MergeFusionInstruction(
-      Cast<HloFusionInstruction>(instruction_to_merge));
+      Cast<HloFusionInstruction>(instruction_to_merge), remove_computation);
 }
 
 // Delegates to HloFusionInstruction::MergeFusionInstructionIntoMultiOutput.
 void HloInstruction::MergeFusionInstructionIntoMultiOutput(
-    HloInstruction* instruction_to_merge) {
+    HloInstruction* instruction_to_merge, bool remove_computation) {
   return Cast<HloFusionInstruction>(this)
       ->MergeFusionInstructionIntoMultiOutput(
-          Cast<HloFusionInstruction>(instruction_to_merge));
+          Cast<HloFusionInstruction>(instruction_to_merge), remove_computation);
 }
 
 HloInstruction* HloInstruction::FuseInstruction(

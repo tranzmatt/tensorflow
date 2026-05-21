@@ -24,50 +24,13 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "xla/backends/gpu/collectives/gpu_clique_key.h"
-#include "xla/backends/gpu/runtime/collective_thunk.h"
 #include "xla/backends/gpu/runtime/command.h"
 #include "xla/backends/gpu/runtime/command_executor.h"
-#include "xla/backends/gpu/runtime/command_state.h"
-#include "xla/backends/gpu/runtime/p2p_thunk_common.h"
 #include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/service/buffer_assignment.h"
-#include "xla/service/shaped_slice.h"
 #include "xla/stream_executor/command_buffer.h"
-#include "xla/stream_executor/stream.h"
-#include "xla/xla_data.pb.h"
 
 namespace xla::gpu {
-
-//===----------------------------------------------------------------------===//
-// CaseCmd
-//===----------------------------------------------------------------------===//
-
-class CaseCmd : public Command {
- public:
-  CaseCmd(ShapedSlice index, std::vector<CommandExecutor> branches);
-
-  absl::Status Initialize(const Thunk::InitializeParams& params) override;
-
-  absl::StatusOr<const se::CommandBuffer::Command*> Record(
-      const Thunk::ExecuteParams& execute_params,
-      const RecordParams& record_params, RecordAction record_action,
-      se::CommandBuffer* command_buffer) override;
-
-  BufferUses buffer_uses() const override;
-
-  absl::Status WalkNested(
-      absl::FunctionRef<absl::Status(Thunk*)> callback) override;
-
- private:
-  ShapedSlice index_;
-  bool index_is_bool_;
-  std::vector<CommandExecutor> branches_;
-};
-
-//===----------------------------------------------------------------------===//
-// WhileCmd
-//===----------------------------------------------------------------------===//
 
 class WhileCmd : public Command {
  public:
@@ -91,6 +54,8 @@ class WhileCmd : public Command {
       absl::FunctionRef<absl::Status(Thunk*)> callback) override;
 
  private:
+  absl::Status WalkNestedCommands(CommandWalker callback) override;
+
   BufferAllocation::Slice pred_;
 
   CommandExecutor cond_commands_;
@@ -99,140 +64,6 @@ class WhileCmd : public Command {
   std::optional<int64_t> trip_count_;
   bool enable_loop_unroll_ = false;
   bool is_unrolled_loop_ = false;
-};
-
-//===----------------------------------------------------------------------===//
-// CollectiveCmd
-//===----------------------------------------------------------------------===//
-
-class CollectiveCmd : public Command {
- public:
-  CollectiveCmd(CommandType cmd_type, CollectiveConfig config,
-                CommunicationId communication_id = CommunicationId(0));
-
-  absl::Status Prepare(const Thunk::PrepareParams& params) final;
-
-  bool IsTracedCommand() const override { return true; }
-
-  bool requires_initialization() const final { return true; }
-
-  absl::StatusOr<const se::CommandBuffer::Command*> RecordTracedCommand(
-      const Thunk::ExecuteParams& execute_params,
-      const RecordParams& record_params, RecordAction record_action,
-      se::CommandBuffer* command_buffer,
-      absl::FunctionRef<absl::Status(se::Stream*)> trace);
-
- protected:
-  const CollectiveConfig& config() const { return config_; }
-  CommunicationId communication_id() const { return communication_id_; }
-
- private:
-  CollectiveConfig config_;
-  CommunicationId communication_id_;
-};
-
-//===----------------------------------------------------------------------===//
-// AllToAllCmd
-//===----------------------------------------------------------------------===//
-
-class AllToAllCmd : public CollectiveCmd {
- public:
-  AllToAllCmd(CollectiveConfig config, bool has_split_dimension,
-              absl::Span<const CollectiveThunk::Buffer> buffers);
-
-  absl::StatusOr<const se::CommandBuffer::Command*> Record(
-      const Thunk::ExecuteParams& execute_params,
-      const RecordParams& record_params, RecordAction record_action,
-      se::CommandBuffer* command_buffer) override;
-
-  BufferUses buffer_uses() const override;
-
- private:
-  bool has_split_dimension_;
-  std::vector<CollectiveThunk::Buffer> buffers_;
-};
-
-//===----------------------------------------------------------------------===//
-// AllGatherCmd
-//===----------------------------------------------------------------------===//
-
-class AllGatherCmd : public CollectiveCmd {
- public:
-  AllGatherCmd(CollectiveConfig config,
-               absl::Span<const CollectiveThunk::Buffer> buffers);
-
-  absl::StatusOr<const se::CommandBuffer::Command*> Record(
-      const Thunk::ExecuteParams& execute_params,
-      const RecordParams& record_params, RecordAction record_action,
-      se::CommandBuffer* command_buffer) override;
-
-  BufferUses buffer_uses() const override;
-
- private:
-  std::vector<CollectiveThunk::Buffer> buffers_;
-};
-
-//===----------------------------------------------------------------------===//
-// CollectivePermuteCmd
-//===----------------------------------------------------------------------===//
-
-class CollectivePermuteCmd : public CollectiveCmd {
- public:
-  CollectivePermuteCmd(CollectiveConfig config, P2PConfig p2p_config,
-                       absl::Span<const CollectiveThunk::Buffer> buffers);
-
-  absl::StatusOr<const se::CommandBuffer::Command*> Record(
-      const Thunk::ExecuteParams& execute_params,
-      const RecordParams& record_params, RecordAction record_action,
-      se::CommandBuffer* command_buffer) override;
-
-  BufferUses buffer_uses() const override;
-
- private:
-  P2PConfig p2p_config_;
-  std::vector<CollectiveThunk::Buffer> buffers_;
-};
-
-//===----------------------------------------------------------------------===//
-// RecvCmd
-//===----------------------------------------------------------------------===//
-
-class RecvCmd : public CollectiveCmd {
- public:
-  RecvCmd(CollectiveConfig config, P2PConfig p2p_config,
-          const CollectiveThunk::Buffer& buffer);
-
-  absl::StatusOr<const se::CommandBuffer::Command*> Record(
-      const Thunk::ExecuteParams& execute_params,
-      const RecordParams& record_params, RecordAction record_action,
-      se::CommandBuffer* command_buffer) override;
-
-  BufferUses buffer_uses() const override;
-
- private:
-  P2PConfig p2p_config_;
-  CollectiveThunk::Buffer buffer_;
-};
-
-//===----------------------------------------------------------------------===//
-// SendCmd
-//===----------------------------------------------------------------------===//
-
-class SendCmd : public CollectiveCmd {
- public:
-  SendCmd(CollectiveConfig config, P2PConfig p2p_config,
-          const CollectiveThunk::Buffer& buffer);
-
-  absl::StatusOr<const se::CommandBuffer::Command*> Record(
-      const Thunk::ExecuteParams& execute_params,
-      const RecordParams& record_params, RecordAction record_action,
-      se::CommandBuffer* command_buffer) override;
-
-  BufferUses buffer_uses() const override;
-
- private:
-  P2PConfig p2p_config_;
-  CollectiveThunk::Buffer buffer_;
 };
 
 }  // namespace xla::gpu
