@@ -277,6 +277,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_enable_all_gather_combine_by_dim(false);
   opts.set_xla_gpu_collective_permute_mode(
       DebugOptions::COLLECTIVES_PRIVATE_MEMORY);
+  opts.set_xla_gpu_all_gather_mode(DebugOptions::COLLECTIVES_PRIVATE_MEMORY);
   opts.set_xla_gpu_enable_reduce_scatter_combine_by_dim(false);
   opts.set_xla_gpu_enable_approx_costly_collectives(false);
 
@@ -459,6 +460,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_dot_merger_threshold_mb(64);
   opts.set_xla_enable_fast_math(false);
   opts.set_xla_gpu_experimental_parallel_collective_overlap_limit(1);
+  opts.set_xla_gpu_experimental_collective_start_as_early_as_possible(false);
   opts.set_xla_gpu_experimental_parallel_async_compute_limit(2);
   opts.set_xla_pjrt_allow_auto_layout_in_hlo(false);
   opts.set_xla_gpu_enable_scatter_determinism_expander(false);
@@ -925,7 +927,7 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
 
   // Custom parser for `xla_gpu_enable_while_loop_unrolling` flag.
   auto setter_for_xla_gpu_enable_while_loop_unrolling =
-      [&debug_options](absl::string_view input) {
+      [debug_options](absl::string_view input) {
         DebugOptions::WhileLoopUnrolling unroll_strategy;
         bool parsed = DebugOptions::WhileLoopUnrolling_Parse(
             absl::AsciiStrToUpper(input), &unroll_strategy);
@@ -1516,6 +1518,15 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
       "debug_options "
       "are written to the --xla_dump_to dir, or, if no dir is specified, to "
       "stdout. Ignored unless xla_dump_hlo_as_text is true."));
+  flag_list->push_back(tsl::Flag(
+      "xla_hlo_print_inline_stack_frames",
+      bool_setter_for(&DebugOptions::set_xla_hlo_print_inline_stack_frames),
+      debug_options->xla_hlo_print_inline_stack_frames(),
+      "If true, when printing HLO text, resolve each instruction's "
+      "stack_frame_id into inline source_file/source_line/source_column "
+      "fields on its metadata, and append the StackFrameIndex resolution "
+      "tables (FileNames, FunctionNames, FileLocations, StackFrames) at "
+      "the end of the module text."));
   flag_list->push_back(
       tsl::Flag("xla_dump_large_constants",
                 bool_setter_for(&DebugOptions::set_xla_dump_large_constants),
@@ -2520,6 +2531,12 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
                 std::string("private"),
                 "Memory mode for collective-permute: private, symmetric, peer. "
                 "See CollectivesMode for details."));
+  flag_list->push_back(tsl::Flag(
+      "xla_gpu_all_gather_mode",
+      collectives_mode_setter_for(&DebugOptions::set_xla_gpu_all_gather_mode),
+      std::string("private"),
+      "Memory mode for all-gather: private, symmetric, peer. "
+      "See CollectivesMode for details."));
   flag_list->push_back(
       tsl::Flag("xla_gpu_use_inprocess_lld",
                 bool_setter_for(&DebugOptions::set_xla_gpu_use_inprocess_lld),
@@ -2762,6 +2779,14 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
       debug_options->xla_gpu_experimental_parallel_collective_overlap_limit(),
       "This controls how many in-flight collectives "
       "latency hiding scheduler can schedule."));
+  flag_list->push_back(tsl::Flag(
+      "xla_gpu_experimental_collective_start_as_early_as_possible",
+      bool_setter_for(
+          &DebugOptions::
+              set_xla_gpu_experimental_collective_start_as_early_as_possible),
+      debug_options
+          ->xla_gpu_experimental_collective_start_as_early_as_possible(),
+      "This controls whether collectives should start as early as possible."));
   flag_list->push_back(tsl::Flag(
       "xla_gpu_experimental_parallel_async_compute_limit",
       int32_setter_for(

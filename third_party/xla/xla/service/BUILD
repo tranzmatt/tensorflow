@@ -2242,6 +2242,18 @@ xla_cc_test(
 )
 
 cc_library(
+    name = "decision",
+    hdrs = ["decision.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+    ] + if_google(["@com_google_absl//absl/types:source_location"]),
+)
+
+cc_library(
     name = "fusion_queue",
     hdrs = ["fusion_queue.h"],
     deps = [
@@ -2255,6 +2267,7 @@ cc_library(
     srcs = ["instruction_fusion.cc"],
     hdrs = ["instruction_fusion.h"],
     deps = [
+        ":decision",
         ":fusion_queue",
         ":hlo_graph_dumper",
         ":hlo_module_config",
@@ -5726,6 +5739,7 @@ cc_library(
         "//xla/hlo/ir:hlo",
         "//xla/hlo/pass:hlo_pass",
         "//xla/tsl/platform:errors",
+        "//xla/tsl/platform:status_macros",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status:statusor",
@@ -6845,6 +6859,7 @@ cc_library(
         "//xla/hlo/ir:hlo",
         "//xla/hlo/pass:hlo_pass",
         "//xla/tsl/platform:logging",
+        "//xla/tsl/platform:status_macros",
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:no_destructor",
