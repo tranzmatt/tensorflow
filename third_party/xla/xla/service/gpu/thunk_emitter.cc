@@ -590,8 +590,8 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCublasLtMatmulThunk(
   auto thunk = std::make_unique<CublasLtMatmulThunk>(
       std::move(thunk_info), std::move(canonical_hlo), std::move(gemm_config),
       blas_lt_epilogue, algorithm, config.autotune_workspace_size(), a, b, c, d,
-      bias, aux, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-      std::nullopt, workspace_buffer);
+      /*group_sizes=*/std::nullopt, bias, aux, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, workspace_buffer);
   return GetThunkSequence(std::move(thunk));
 }
 
@@ -678,8 +678,8 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCublasLtMatmulThunkF8(
   auto thunk = std::make_unique<CublasLtMatmulThunk>(
       std::move(thunk_info), std::move(canonical_hlo), std::move(gemm_config),
       blas_lt_epilogue, algorithm, config.autotune_workspace_size(), a, b, c, d,
-      bias, std::nullopt, a_scale, b_scale, std::nullopt, d_scale, d_amax,
-      workspace_buffer);
+      /*group_sizes=*/std::nullopt, bias, std::nullopt, a_scale, b_scale,
+      std::nullopt, d_scale, d_amax, workspace_buffer);
   return GetThunkSequence(std::move(thunk));
 }
 
@@ -753,8 +753,8 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCublasLtGroupedMatmulThunk(
   auto thunk = std::make_unique<CublasLtMatmulThunk>(
       std::move(thunk_info), std::move(canonical_hlo), std::move(gemm_config),
       blas_lt_epilogue, algorithm, config.autotune_workspace_size(), a, b, c, d,
-      group_sizes, bias, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-      std::nullopt, std::nullopt, workspace_buffer);
+      std::move(group_sizes), bias, std::nullopt, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, std::nullopt, workspace_buffer);
   return GetThunkSequence(std::move(thunk));
 }
 
@@ -804,6 +804,7 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCublasLtMatmulThunkMx(
   auto thunk = std::make_unique<CublasLtMatmulThunk>(
       std::move(thunk_info), std::move(canonical_hlo), std::move(gemm_config),
       blas_lt_epilogue, algorithm, config.autotune_workspace_size(), a, b, c, d,
+      /*group_sizes=*/std::nullopt,
       /*bias=*/std::nullopt, /*aux=*/std::nullopt, a_scale, b_scale,
       /*c_scale=*/std::nullopt, /*d_scale=*/std::nullopt,
       /*d_amax=*/std::nullopt, workspace_buffer);
@@ -1404,21 +1405,10 @@ AsyncThunkSequence ThunkEmitter::EmitFusion(const HloFusionInstruction* instr) {
 
   VLOG(3) << "ThunkEmitter::EmitFusion:start";
   std::unique_ptr<FusionInterface> emitter = GetFusionEmitter(
-      /*fusion_info=*/HloFusionInfo(
-          /*analysis=*/fusion_analysis, instr,
-          /*buffer_assignment=*/
-          &ir_emitter_context_->buffer_assignment(),
-          /*call_graph=*/*call_graph_),
+      HloFusionInfo(fusion_analysis, instr,
+                    &ir_emitter_context_->buffer_assignment(), *call_graph_),
       ir_emitter_context_->mlir_context());
-  ASSIGN_OR_RETURN(auto result, emitter->Emit(*ir_emitter_context_, *instr));
-
-  // Use override flag because libdevice functions can be present in both.
-  if (result.module) {
-    kernel_modules_.push_back(std::move(result.module));
-  }
-
-  VLOG(3) << "ThunkEmitter::EmitFusion:complete";
-  return std::move(result.thunks);
+  return emitter->Emit(*ir_emitter_context_, *instr);
 }
 
 AsyncThunkSequence ThunkEmitter::EmitDynamicSliceFusionV2(
@@ -1702,8 +1692,8 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitReplicaOrPartitionId(
       result_slice));
 }
 
-[[deprecated("Use NCCL 2.28+ primitives instead.")]]
-bool IsNvshmemCollective(const HloInstruction* instr) {
+[[deprecated("Use NCCL 2.28+ primitives instead.")]] bool IsNvshmemCollective(
+    const HloInstruction* instr) {
   if (instr->has_backend_config()) {
     auto gpu_config = instr->backend_config<GpuBackendConfig>();
     const CollectiveBackendConfig& backend_config =
@@ -2079,9 +2069,9 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCollectiveAsyncDone(
       it->second));
 }
 
-[[deprecated("Use NCCL 2.28+ primitives instead.")]]
-absl::StatusOr<ThunkSequence> ThunkEmitter::EmitNvshmemAsyncDone(
-    const HloInstruction* inst) {
+[[deprecated(
+    "Use NCCL 2.28+ primitives instead.")]] absl::StatusOr<ThunkSequence>
+ThunkEmitter::EmitNvshmemAsyncDone(const HloInstruction* inst) {
   bool is_send_recv =
       inst->opcode() == HloOpcode::kSendDone ||
       inst->opcode() == HloOpcode::kRecvDone ||
@@ -2109,11 +2099,12 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitNvshmemAsyncDone(
 }
 
 template <typename NvshmemAllReduceThunkType, typename HloAllReduceInstruction>
-[[deprecated("Use NCCL 2.28+ primitives instead.")]]
-absl::StatusOr<ThunkSequence> ThunkEmitter::EmitNvshmemThunk(
-    Thunk::Kind kind, const HloInstruction* async_start,
-    const HloAllReduceInstruction* inst,
-    std::optional<bool> use_global_device_ids) {
+[[deprecated(
+    "Use NCCL 2.28+ primitives instead.")]] absl::StatusOr<ThunkSequence>
+ThunkEmitter::EmitNvshmemThunk(Thunk::Kind kind,
+                               const HloInstruction* async_start,
+                               const HloAllReduceInstruction* inst,
+                               std::optional<bool> use_global_device_ids) {
   CHECK(kind == Thunk::Kind::kNvshmemAllReduce);
   const auto& hlo_config = ir_emitter_context_->hlo_module().config();
   int64_t replica_count = hlo_config.replica_count();

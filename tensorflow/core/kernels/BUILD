@@ -2,11 +2,7 @@ load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
-load(
-    "@local_config_rocm//rocm:build_defs.bzl",
-    "if_rocm",
-    "if_rocm_hipblaslt",
-)
+load("@local_config_rocm//rocm:build_defs.bzl", "if_rocm")
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load(
     "@xla//xla/tsl/mkl:build_defs.bzl",
@@ -46,6 +42,12 @@ load(
     "tf_cuda_tests_tags",
 )
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+
+# copybara:uncomment_begin(reason: google-internal)
+# load("//tensorflow:third_party/tensorflow/google/internal_visibility.bzl", "LOOSE_HEADER_VISIBILITY")
+# copybara:uncomment_end_and_comment_begin
+LOOSE_HEADER_VISIBILITY = []
+# copybara:comment_end
 
 # Description:
 # Op kernel implementations for TensorFlow.
@@ -3641,7 +3643,7 @@ tf_kernel_library(
         "@xla//xla/tsl/framework/contraction:eigen_contraction_kernel",
     ] + mkl_deps() + if_cuda([
         "@xla//xla/stream_executor/cuda:cublas_plugin",
-    ]) + if_rocm_hipblaslt([
+    ]) + if_rocm([
         "@xla//xla/stream_executor/rocm:hipblas_lt_header",
     ]) + if_cuda_or_rocm([
         ":conv_ops_gpu_hdrs",
@@ -8056,14 +8058,14 @@ cc_library(
 # Here it is used to avoid header parsing errors in packages where the feature
 # parse_headers was enabled since loose headers were not being parsed. See
 # go/loose-lsc-one-target-approach for more details.
+
 cc_library(
     name = "loose_headers",
     tags = ["avoid_dep"],
     textual_hdrs = glob(["*.h"]),
     visibility = [
-        "//smartass/brain:__subpackages__",
         "//tensorflow:__subpackages__",
-    ],
+    ] + LOOSE_HEADER_VISIBILITY,
 )
 
 # Deleted deps

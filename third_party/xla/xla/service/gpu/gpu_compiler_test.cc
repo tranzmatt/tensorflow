@@ -90,9 +90,8 @@ limitations under the License.
 #include "xla/stream_executor/cuda/cuda_compute_capability.h"
 #include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/device_description.h"
-#include "xla/stream_executor/platform.h"
+#include "xla/stream_executor/dnn.h"
 #include "xla/stream_executor/rocm/rocm_compute_capability.h"
-#include "xla/stream_executor/semantic_version.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/tests/hlo_pjrt_interpreter_reference_mixin.h"
 #include "xla/tests/hlo_pjrt_test_base.h"
@@ -129,10 +128,6 @@ using ::testing::IsEmpty;
 using ::testing::IsSupersetOf;
 using ::testing::Matches;
 using ::testing::Not;
-using ::testing::NotNull;
-using ::testing::Pointee;
-using ::testing::Property;
-using ::testing::SizeIs;
 using ::testing::StartsWith;
 using ::testing::TempDir;
 using ::testing::TestParamInfo;
@@ -1748,6 +1743,13 @@ ENTRY main {
 }
 
 TEST_F(GpuCompilerTest, NoCudnnVectorizationOnHopperAndBeyond) {
+  if (gpu_target_config().dnn_version_info <
+          stream_executor::dnn::VersionInfo(9, 12, 0) &&
+      absl::StrContains(device_description().name(), "GB200")) {
+    GTEST_SKIP()
+        << "Skipping test as it requires cuDNN >= 9.12. on GB200. Otherwise, "
+           "test will crash.";
+  }
   bool is_hopper_or_beyond = get_cuda_cc().IsAtLeastHopper();
 
   constexpr absl::string_view kHlo = R"(
@@ -1867,7 +1869,7 @@ ENTRY main {
 
   // Downcast to GPU executable
   xla::gpu::GpuExecutable* gpu_executable =
-      tensorflow::down_cast<xla::gpu::GpuExecutable*>(executable.get());
+      absl::down_cast<GpuExecutable*>(executable.get());
   ASSERT_NE(gpu_executable, nullptr);
 
   // Get the thunk sequence and check its size and type
@@ -2098,7 +2100,7 @@ TEST_F(GpuCompilerTest, MosaicCollectiveMetadataRequiresSymmetricMemoryCopies) {
                        compiler()->RunBackend(std::move(optimized_module),
                                               nullptr, compile_options));
   const HloModule& final_module =
-      tensorflow::down_cast<GpuExecutable*>(executable.get())->module();
+      absl::down_cast<GpuExecutable*>(executable.get())->module();
 
   constexpr absl::string_view kExpected = R"(
     // CHECK: [[P:%[^ ]+]] = s32[1]{0} parameter(0)
@@ -2885,6 +2887,40 @@ ENTRY entry {
       compiler()->RunHloPasses(std::move(module), nullptr, options));
 
   EXPECT_GT(MultiModuleDriver::GetCompileCount(), 0);
+}
+
+TEST_F(GpuCompilerTest, VerifySharedCompilationUnitCompilesOnGpu) {
+  const char* hlo_string = R"(
+HloModule module
+callee {
+  p0 = f32[] parameter(0)
+  ROOT neg = f32[] negate(p0)
+}
+ENTRY entry {
+  p0 = f32[] parameter(0)
+  p1 = f32[] parameter(1)
+  call1 = f32[] call(p0), to_apply=callee,
+    frontend_attributes={compilation_unit="callee"}
+  call2 = f32[] call(p1), to_apply=callee,
+    frontend_attributes={compilation_unit="callee"}
+  ROOT add = f32[] add(call1, call2)
+}
+)";
+
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                       ParseAndReturnVerifiedModule(hlo_string));
+
+  auto options = Compiler::CompileOptions();
+  options.gpu_topology =
+      GetSingleDeviceGpuTopology(/*platform_version=*/"", gpu_target_config());
+
+  ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<HloModule> optimized_module,
+      compiler()->RunHloPasses(std::move(module), nullptr, options));
+
+  ASSERT_OK_AND_ASSIGN(
+      auto executable,
+      compiler()->RunBackend(std::move(optimized_module), nullptr, options));
 }
 
 static absl::Status MockCustomCallExecuteF32(
