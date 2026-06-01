@@ -2862,6 +2862,10 @@ tf_kernel_library(
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core/util/tensor_bundle",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@eigen_archive//:eigen3",
     ],
 )
@@ -6414,6 +6418,15 @@ cc_library(
 filegroup(
     name = "mobile_srcs",
     srcs = [
+        "initializable_lookup_table.cc",
+        "lookup_util.cc",
+        "pooling_ops_common.cc",
+    ],
+)
+
+filegroup(
+    name = "mobile_hdrs",
+    srcs = [
         "avgpooling_op.h",
         "batch_util.h",
         "cwise_ops.h",
@@ -6426,14 +6439,11 @@ filegroup(
         "eigen_cuboid_convolution.h",
         "eigen_pooling.h",
         "fifo_queue.h",
-        "initializable_lookup_table.cc",
         "initializable_lookup_table.h",
-        "lookup_util.cc",
         "lookup_util.h",
         "maxpooling_op.h",
         "ops_util.h",
         "padding_fifo_queue.h",
-        "pooling_ops_common.cc",
         "pooling_ops_common.h",
         "queue_base.h",
         "queue_op.h",

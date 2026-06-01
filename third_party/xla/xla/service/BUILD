@@ -2251,6 +2251,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
+        "@tsl//tsl/platform",
     ] + if_google(["@com_google_absl//absl/types:source_location"]),
 )
 
@@ -5803,7 +5804,6 @@ cc_library(
     srcs = ["xla_debug_info_manager.cc"],
     hdrs = ["xla_debug_info_manager.h"],
     deps = [
-        ":buffer_assignment",
         ":hlo_proto_cc",
         ":hlo_proto_util",
         "//xla/hlo/ir:hlo",
@@ -5818,7 +5818,6 @@ xla_cc_test(
     name = "xla_debug_info_manager_test",
     srcs = ["xla_debug_info_manager_test.cc"],
     deps = [
-        ":buffer_assignment",
         ":hlo_module_config",
         ":hlo_proto_cc",
         ":xla_debug_info_manager",
@@ -6884,6 +6883,7 @@ xla_cc_test(
         ":hlo_cse",
         ":hlo_proto_cc",
         ":xla_transform",
+        "//xla:shape_util",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/parser:hlo_parser",
         "//xla/hlo/pass:hlo_pass_pipeline",

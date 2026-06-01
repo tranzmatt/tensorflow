@@ -36,11 +36,13 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/tsl/platform/status_macros.h"
 #include "rocm/include/hip/hip_runtime.h"
+#include "rocm/include/rccl/rccl.h"
 #include "rocm/rocm_config.h"  // IWYU pragma: keep
 #include "xla/backends/gpu/collectives/cancellation_token.h"
 #include "xla/backends/gpu/collectives/gpu_collectives.h"
 #include "xla/backends/gpu/collectives/gpu_communicator.h"
 #include "xla/backends/gpu/collectives/rccl_errors.h"
+#include "xla/backends/gpu/collectives/rccl_symmetric_memory.h"
 #include "xla/backends/gpu/collectives/single_threaded_executor.h"
 #include "xla/core/collectives/communicator.h"
 #include "xla/core/collectives/rank_id.h"
@@ -57,12 +59,6 @@ limitations under the License.
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "tsl/platform/casts.h"
-
-#if (TF_ROCM_VERSION >= 50200)
-#include "rocm/include/rccl/rccl.h"
-#else
-#include "rocm/include/rccl.h"
-#endif  // TF_ROCM_VERSION >= 50200
 
 namespace xla::gpu {
 namespace {
@@ -88,17 +84,9 @@ static absl::StatusOr<ncclDataType_t> ToNcclDataType(
     se::RocmComputeCapability rocm_cc) {
   switch (dtype) {
     case F8E5M2:
-#if TF_ROCM_VERSION >= 70000
       return rocm_cc.has_ocp_fp8_support() ? ncclFloat8e5m2 : ncclInt8;
-#else
-      return ncclInt8;
-#endif
     case F8E4M3FN:
-#if TF_ROCM_VERSION >= 70000
       return rocm_cc.has_ocp_fp8_support() ? ncclFloat8e4m3 : ncclInt8;
-#else
-      return ncclInt8;
-#endif
     case S8:
     case F8E5M2FNUZ:
     case F8E4M3FNUZ:
@@ -681,6 +669,11 @@ absl::Status RcclCommunicator::LaunchRecv(se::DeviceAddressBase recv_buffer,
     RETURN_IF_ERROR(PollUntilDone());
   }
   return absl::OkStatus();
+}
+
+absl::StatusOr<std::unique_ptr<SymmetricMemory>>
+RcclCommunicator::CreateSymmetricMemory(se::DeviceAddressBase addr) {
+  return RcclSymmetricMemory::Create(comm_, addr);
 }
 
 std::string RcclCommunicator::ToString() const {

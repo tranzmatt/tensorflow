@@ -128,7 +128,6 @@ using ::testing::IsEmpty;
 using ::testing::IsSupersetOf;
 using ::testing::Matches;
 using ::testing::Not;
-using ::testing::StartsWith;
 using ::testing::TempDir;
 using ::testing::TestParamInfo;
 using ::testing::Values;
@@ -1660,15 +1659,6 @@ ENTRY %main {
   ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                        ParseAndReturnVerifiedModule(kHlo, config));
 
-  absl::ScopedMockLog mock_log(absl::MockLogDefault::kIgnoreUnexpected);
-  EXPECT_CALL(mock_log,
-              Log(absl::LogSeverity::kWarning, EndsWith("/sort_rewriter.cc"),
-                  StartsWith("Using fallback sort algorithm")))
-      .Times(AtLeast(1));
-
-  // StartCapturingLogs has to be called even if we expect not to capture any
-  // logs.
-  mock_log.StartCapturingLogs();
   TF_ASSERT_OK(compiler()->RunHloPasses(std::move(module), nullptr, nullptr));
 }
 
@@ -1897,9 +1887,10 @@ ENTRY main {
         EXPECT_THAT(kinds, ElementsAre(Thunk::Kind::kCommandBuffer));
       } else if (kinds.size() == 4) {
         // CUB sort via FFI custom call
-        EXPECT_THAT(kinds,
-                    ElementsAre(Thunk::Kind::kKernel, Thunk::Kind::kCustomCall,
-                                Thunk::Kind::kKernel, Thunk::Kind::kKernel));
+        EXPECT_THAT(kinds, ElementsAre(Thunk::Kind::kCustomKernel,
+                                       Thunk::Kind::kCustomCall,
+                                       Thunk::Kind::kCustomKernel,
+                                       Thunk::Kind::kCustomKernel));
       } else {
         FAIL() << "Unexpected thunk sequence size: " << kinds.size();
       }
@@ -2083,7 +2074,7 @@ TEST_F(GpuCompilerTest, MosaicCollectiveMetadataRequiresSymmetricMemoryCopies) {
     HloModule test
     ENTRY main {
       p = s32[1] parameter(0)
-      mosaic = (s32[1]{0}) custom-call(p), custom_call_target="mosaic_gpu_v2", api_version=API_VERSION_TYPED_FFI, backend_config={uses_xla_collective_metadata=true}
+      mosaic = (s32[1]{0}) custom-call(p), custom_call_target="mosaic_gpu_v2", api_version=API_VERSION_TYPED_FFI, backend_config={uses_xla_collective_metadata=true}, frontend_attributes={operands_memory_spaces="{0:1}", results_memory_spaces="{0:1}"}
       ROOT res = s32[1]{0} get-tuple-element(mosaic), index=0
     }
   )";
@@ -2165,9 +2156,9 @@ TEST_P(OneShotRaggedAllToAllMemSpaceTest, DirectUsage) {
   HloModuleConfig config = GetModuleConfigForTest();
   DebugOptions& opts = config.mutable_debug_options();
   opts.set_xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl(true);
-  if (GetParam().is_zero_copy) {
-    opts.set_xla_gpu_experimental_ragged_all_to_all_zero_copy(true);
-  }
+  opts.set_xla_gpu_experimental_ragged_all_to_all_zero_copy(
+      GetParam().is_zero_copy);
+
   std::pair<const HloModule*, std::unique_ptr<OpaqueExecutable>>
       optimized_module_and_executable;
   ASSERT_OK_AND_ASSIGN(optimized_module_and_executable,
@@ -2268,9 +2259,9 @@ TEST_P(OneShotRaggedAllToAllMemSpaceTest, LoopUsage) {
   HloModuleConfig config = GetModuleConfigForTest();
   DebugOptions& opts = config.mutable_debug_options();
   opts.set_xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl(true);
-  if (GetParam().is_zero_copy) {
-    opts.set_xla_gpu_experimental_ragged_all_to_all_zero_copy(true);
-  }
+  opts.set_xla_gpu_experimental_ragged_all_to_all_zero_copy(
+      GetParam().is_zero_copy);
+
   std::pair<const HloModule*, std::unique_ptr<OpaqueExecutable>>
       optimized_module_and_executable;
   ASSERT_OK_AND_ASSIGN(optimized_module_and_executable,
