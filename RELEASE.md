@@ -21,12 +21,15 @@ In `tensorflow/c/experimental/filesystem/filesystem_interface.h`, removed `TF_Tr
 * `tf.lite`
     * Adds support for QUI4 (Quantized Unsigned 4-bit) in Dequantize operator.
     * Adds support for FP16 and BF16 in Unpack operator.
+    * Adds support for FP16 in Transpose and DynamicUpdateSlice operator.
     * Transpose now supports up to 8D tensors.
 
 ### Bug Fixes and Other Changes
 
 * `BatchFunction Operator`
     * Adds the `num_warmup_batch_threads` op attribute to support a separate thread pool for processing warmup requests.
+* `TensorFlow API`
+    * Exports `__new__` in public API golden files for subclasses of `tuple` (like `tf.io.FixedLenFeature`) to fix false positives during static type checking.>
 
 * <SIMILAR TO ABOVE SECTION, BUT FOR OTHER IMPORTANT CHANGES / BUG FIXES>
 * <IF A CHANGE CLOSES A GITHUB ISSUE, IT SHOULD BE DOCUMENTED HERE>

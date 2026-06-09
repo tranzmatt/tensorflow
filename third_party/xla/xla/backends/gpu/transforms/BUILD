@@ -273,6 +273,7 @@ cc_library(
     hdrs = ["fusion_dynamic_memcpy_rewriter.h"],
     deps = [
         ":dynamic_slice_fusion",
+        "//xla:shape_util",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/pass:hlo_pass",
         "//xla/service/gpu:backend_configs_cc",
@@ -1773,6 +1774,8 @@ cc_library(
         "//xla:xla_data_proto_cc",
         "//xla/backends/gpu/codegen/triton:support",
         "//xla/codegen/tiling:symbolic_tile_analysis",
+        "//xla/codegen/tiling/experimental:tile",
+        "//xla/codegen/tiling/experimental:tiled_hlo",
         "//xla/hlo/analysis:symbolic_map",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/pass:hlo_pass",
@@ -2969,6 +2972,7 @@ cc_library(
         "//xla/hlo/pass:hlo_pass_pipeline",
         "//xla/hlo/utils:hlo_query",
         "//xla/hlo/utils:hlo_traversal",
+        "//xla/service:decision",
         "//xla/service:hlo_cost_analysis",
         "//xla/service:instruction_fusion",
         "//xla/service/gpu:alias_info",
@@ -2983,9 +2987,7 @@ cc_library(
         "//xla/service/gpu/model:triton_emitter_constraints",
         "//xla/stream_executor:device_description",
         "//xla/tools:hlo_decomposer_lib",
-        "//xla/tsl/platform:errors",
         "//xla/tsl/platform:status_macros",
-        "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
@@ -4012,7 +4014,6 @@ xla_cc_test(
 xla_cc_test(
     name = "scaled_dot_rewriter_test",
     srcs = ["scaled_dot_rewriter_test.cc"],
-    tags = ["pjrt_migration_candidate"],
     deps = [
         ":scaled_dot_rewriter",
         "//xla:error_spec",
